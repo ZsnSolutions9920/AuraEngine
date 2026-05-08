@@ -27,6 +27,7 @@ This document tracks the phased rollout. Phase 1 is shipped in code on this bran
 | Sender health foundation (additive, no send-path changes) — Phase 3.1 | `supabase/migrations/20260508300000_sender_health_foundation.sql` | ✅ |
 | DB refinement: `email_messages.workspace_id`, `email_dlq` FK correction, deprecation comments on `ai_prompts` / `ai_usage_logs` / `email_provider_configs` / `strategy_tasks` / `strategy_notes` / legacy `leads` columns | `supabase/migrations/20260508400000_db_refinement.sql` | ✅ |
 | Phase 3.2.1 send-path data migration + counters + DLQ wiring (credential source still legacy) | `supabase/migrations/20260508500000_send_path_data_migration.sql` + 3 edge function updates | ✅ |
+| Phase 3.2.2 credential source swap — send-email reads from `sender_account_secrets` first, legacy `email_provider_configs` as defensive fallback | `supabase/functions/send-email/index.ts` (`loadSenderAccountCreds` helper) | ✅ |
 
 **Why these and not others.** Phase 1 had to be additive and reversible. Memory is foundational (everything in Phase 2 builds on it). Navigation pillars set the product story. Mission Control proves the AI-native pattern without removing the existing dashboard. Centralised AI config removes the friction tax on every future model upgrade. Nothing here touches the email send path, billing, RLS posture, or existing user data.
 
@@ -117,19 +118,44 @@ in `sender_daily_cap` becomes load-bearing.
 What's still pending: send-email continues to read **credentials** from
 `email_provider_configs` (legacy). Phase 3.2.2 below flips that.
 
-### Phase 3.2.2 — credential source swap (NOT YET — needs dedicated session)
+### Phase 3.2.2 — credential source swap (✅ shipped 2026-05-09)
+
+`send-email` now reads credentials from `sender_account_secrets` first
+(joined to `sender_accounts` so `from_email` / `from_name` come from the
+public side), falling back to the legacy `email_provider_configs` path
+on any miss. New helper `loadSenderAccountCreds(senderAccountId)` returns
+`null` whenever:
+- the sender_accounts row is missing
+- the sender_account_secrets row is missing
+- there's no usable cred field (no api_key AND no SMTP host+user)
+
+Defensive design: a failure of the canonical path never breaks sending.
+The legacy path catches every edge case until enough send volume gives
+us confidence to drop it.
+
+The `sender_account` lookup ordering is: matching `from_email` (if the
+caller specified one) → `is_default DESC` → `health_score DESC`.
+This means without an explicit `from_email`, the workspace's default
+sender (or the healthiest one) is used.
+
+NOT in this ship (deferred to Phase 3.2.3):
+- Hard-fail pre-flight cap check (`daily_sent < daily_cap`)
+- `pick_outreach_sender` for requests that don't supply a provider
+
+### Phase 3.2.3 — caps + auto-pick (still owed)
 
 The high-blast piece. Until shipped, `send-email/index.ts` continues to
 read from legacy `email_provider_configs` and `email_messages.sender_account_id`
 remains null for new rows.
 
-**Required scope (3.2.1 done; 3.2.2 still owed):**
-1. ✅ Migrate existing `email_provider_configs` → `sender_accounts` / `sender_account_secrets` (Phase 3.2.1)
-2. ⏳ Modify `send-email/index.ts` to call `pick_outreach_sender(workspace_id)`, read creds from `sender_account_secrets` via service role
+**Required scope (3.2.1 + 3.2.2 done; 3.2.3 still owed):**
+1. ✅ Migrate `email_provider_configs` → `sender_accounts` / `sender_account_secrets` (Phase 3.2.1)
+2. ✅ Read creds from `sender_account_secrets` via service role (Phase 3.2.2)
 3. ✅ `email_messages.sender_account_id` populated on insert (Phase 3.2.1)
 4. ✅ `email_dlq` writes wired in both webhook handlers (Phase 3.2.1)
 5. ✅ `consecutive_failures` reset/increment (Phase 3.2.1)
-6. ⏳ Pre-flight check `daily_sent < daily_cap` and bail with explicit error if all senders are capped
+6. ⏳ Use `pick_outreach_sender` when caller doesn't supply provider (Phase 3.2.3)
+7. ⏳ Pre-flight check `daily_sent < daily_cap` and bail with explicit error if all senders are capped (Phase 3.2.3)
 
 **Acceptance criteria:** Health scores trend with real bounce/spam rates;
 warmup ramp visible on freshly-enrolled accounts; one sender suspended

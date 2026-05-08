@@ -77,6 +77,51 @@ async function loadProviderCreds(
   };
 }
 
+// ── Phase 3.2.2: load creds from sender_account_secrets (canonical path) ──
+//
+// Joins sender_accounts → sender_account_secrets so we get from_email +
+// from_name from the public side and the credentials from the secret side
+// in a single round-trip. Returns null if either row is missing — caller
+// falls back to loadProviderCreds (legacy email_provider_configs).
+async function loadSenderAccountCreds(
+  supabaseAdmin: ReturnType<typeof createClient>,
+  senderAccountId: string,
+): Promise<ProviderCreds | null> {
+  try {
+    const { data } = await supabaseAdmin
+      .from("sender_accounts")
+      .select(`
+        from_email, from_name,
+        sender_account_secrets ( api_key, smtp_host, smtp_port, smtp_user, smtp_pass )
+      `)
+      .eq("id", senderAccountId)
+      .maybeSingle();
+
+    if (!data) return null;
+    const secrets = Array.isArray((data as any).sender_account_secrets)
+      ? (data as any).sender_account_secrets[0]
+      : (data as any).sender_account_secrets;
+    if (!secrets) return null;
+
+    // At minimum a usable cred path must be present (API key OR SMTP host+user).
+    const hasUsable = !!secrets.api_key || (!!secrets.smtp_host && !!secrets.smtp_user);
+    if (!hasUsable) return null;
+
+    return {
+      api_key:    secrets.api_key   ?? undefined,
+      smtp_host:  secrets.smtp_host ?? undefined,
+      smtp_port:  secrets.smtp_port ?? 587,
+      smtp_user:  secrets.smtp_user ?? undefined,
+      smtp_pass:  secrets.smtp_pass ?? undefined,
+      from_email: (data as any).from_email ?? undefined,
+      from_name:  (data as any).from_name  ?? undefined,
+    };
+  } catch (err) {
+    console.warn("[send-email] sender_account_secrets read failed:", (err as Error).message);
+    return null;
+  }
+}
+
 // ── Link rewriting + pixel injection (server-side instrumentation) ──
 function instrumentHtml(
   html: string,
@@ -418,19 +463,18 @@ serve(async (req) => {
       );
     }
 
-    // Load per-user provider credentials (falls back to env vars)
-    const creds = await loadProviderCreds(supabaseAdmin, userId, provider);
-    const senderEmail =
-      from_email || creds.from_email || creds.smtp_user || "noreply@example.com";
-
     // ── Phase 3.2.1: resolve workspace_id + sender_account_id ──
-    // We don't yet read credentials from sender_account_secrets — the
-    // legacy email_provider_configs path above is still authoritative —
-    // but we DO populate the new IDs on email_messages so the Phase 3.1
-    // sender-health functions get real data. If either lookup fails,
-    // we leave the column null and proceed.
+    // We resolve these first so we can attempt the canonical credential
+    // path (sender_account_secrets) before falling back to the legacy
+    // email_provider_configs source. Lookups are best-effort — failures
+    // leave the IDs null and the legacy path runs.
     let workspaceId: string | null = null;
     let senderAccountId: string | null = null;
+
+    // We need an early guess at senderEmail to look up the matching sender_account.
+    // Final senderEmail is computed once creds are loaded below.
+    const senderEmailHint = from_email ?? null;
+
     try {
       const { data: wm } = await supabaseAdmin
         .from("workspace_members")
@@ -442,12 +486,17 @@ serve(async (req) => {
       workspaceId = (wm?.workspace_id as string | undefined) ?? null;
 
       if (workspaceId) {
-        const { data: sa } = await supabaseAdmin
+        let q = supabaseAdmin
           .from("sender_accounts")
           .select("id")
           .eq("workspace_id", workspaceId)
           .eq("provider", provider)
-          .ilike("from_email", senderEmail)
+          .eq("status", "connected")
+          .eq("use_for_outreach", true);
+        if (senderEmailHint) q = q.ilike("from_email", senderEmailHint);
+        const { data: sa } = await q
+          .order("is_default", { ascending: false })
+          .order("health_score", { ascending: false, nullsFirst: false })
           .limit(1)
           .maybeSingle();
         senderAccountId = (sa?.id as string | undefined) ?? null;
@@ -455,6 +504,21 @@ serve(async (req) => {
     } catch (lookupErr) {
       console.warn("[send-email] sender_account lookup failed:", (lookupErr as Error).message);
     }
+
+    // ── Phase 3.2.2: load credentials, preferring sender_account_secrets ──
+    // Falls back to the legacy email_provider_configs path if the
+    // canonical path returns null (no sender_account match, no secrets row,
+    // or no usable cred fields).
+    let creds: ProviderCreds | null = null;
+    if (senderAccountId) {
+      creds = await loadSenderAccountCreds(supabaseAdmin, senderAccountId);
+    }
+    if (!creds) {
+      creds = await loadProviderCreds(supabaseAdmin, userId, provider);
+    }
+
+    const senderEmail =
+      from_email || creds.from_email || creds.smtp_user || "noreply@example.com";
 
     // 1. Create email_messages record
     const { data: emailMsg, error: msgError } = await supabaseAdmin
