@@ -25,6 +25,7 @@ This document tracks the phased rollout. Phase 1 is shipped in code on this bran
 | AI Command Center thumbs feedback → `workspace_memory` writer | `components/ai/MessageRow.tsx` + `pages/portal/AICommandCenter.tsx` | ✅ |
 | Mission Control becomes default `/portal` (legacy dashboard moved to `/portal/dashboard` + reachable via "Full dashboard" button) | `App.tsx` route swap + `MissionControl.tsx` header CTA | ✅ |
 | Sender health foundation (additive, no send-path changes) — Phase 3.1 | `supabase/migrations/20260508300000_sender_health_foundation.sql` | ✅ |
+| DB refinement: `email_messages.workspace_id`, `email_dlq` FK correction, deprecation comments on `ai_prompts` / `ai_usage_logs` / `email_provider_configs` / `strategy_tasks` / `strategy_notes` / legacy `leads` columns | `supabase/migrations/20260508400000_db_refinement.sql` | ✅ |
 
 **Why these and not others.** Phase 1 had to be additive and reversible. Memory is foundational (everything in Phase 2 builds on it). Navigation pillars set the product story. Mission Control proves the AI-native pattern without removing the existing dashboard. Centralised AI config removes the friction tax on every future model upgrade. Nothing here touches the email send path, billing, RLS posture, or existing user data.
 
