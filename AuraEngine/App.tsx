@@ -11,6 +11,8 @@ import { useIdlePrefetch } from './hooks/useIdlePrefetch';
 import { useAuthMachine } from './hooks/useAuthMachine';
 import { AuthGate } from './components/auth/AuthGate';
 import { useIsMobile } from './hooks/useIsMobile';
+import { canEnterAdmin, canEnterSupport } from './lib/permissions';
+import { loadBranding, applyBrandingToDocument } from './lib/branding';
 
 // Dev perf panel — lazy-loaded, tree-shaken in production
 const PerfPanel = lazy(() => import('./components/dev/PerfPanel'));
@@ -166,6 +168,20 @@ const App: React.FC = () => {
   const [showLogoutModal, setShowLogoutModal] = useState(false);
   const qc = useQueryClient();
 
+  // Phase 4.6.a — apply per-workspace branding once we have a user.
+  // Best-effort; failure leaves platform defaults in place.
+  useEffect(() => {
+    if (!user?.id) {
+      applyBrandingToDocument(null);
+      return;
+    }
+    let cancelled = false;
+    loadBranding(user.id).then((b) => {
+      if (!cancelled) applyBrandingToDocument(b);
+    }).catch(() => { /* keep defaults */ });
+    return () => { cancelled = true; };
+  }, [user?.id]);
+
   // ErrorBoundary reset: invalidate caches + re-bootstrap auth
   const handleErrorReset = useCallback(() => {
     retry();
@@ -306,7 +322,7 @@ const App: React.FC = () => {
           <Route
             path="/admin"
             element={
-              user?.role === UserRole.ADMIN ?
+              canEnterAdmin(user) ?
               <AdminLayout user={user!} onLogout={handleLogout} /> :
               <AuthRedirect />
             }
@@ -325,7 +341,7 @@ const App: React.FC = () => {
             <Route path="console" element={<AdminConsolePage />} />
             <Route path="ops" element={<AdminOpsCenter />} />
             <Route path="command" element={<AdminCommandCenter />} />
-            {user?.is_super_admin && (
+            {canEnterSupport(user) && (
               <Route path="support" element={<SupportConsole />} />
             )}
           </Route>
