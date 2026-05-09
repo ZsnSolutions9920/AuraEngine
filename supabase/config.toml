@@ -13,6 +13,18 @@
 [functions.v1-leads]
 verify_jwt = false  # Public REST API — auth via api_keys (Bearer scal_*)
 
+[functions.v1-sequences]
+verify_jwt = false
+
+[functions.v1-campaigns]
+verify_jwt = false
+
+[functions.v1-analytics]
+verify_jwt = false
+
+# admin-audit-export uses the user JWT path (admin role check inside the
+# function); leave verify_jwt at default true.
+
 # Existing public endpoints whose handlers already do their own auth/rate
 # limit (mentioned here for completeness; CLI may already have them set
 # server-side from prior deploys).
