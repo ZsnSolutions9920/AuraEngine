@@ -1,0 +1,299 @@
+openapi: 3.1.0
+
+info:
+  title: Scaliyo Public API
+  version: "1.0.0"
+  description: |
+    The Scaliyo Public API exposes lead, sequence, campaign, and analytics
+    data via stable REST endpoints. Authentication is by **personal access
+    token** (PAT), minted at https://scaliyo.com/portal/api-keys.
+
+    All requests require an `Authorization: Bearer scal_<token>` header.
+    Workspaces are derived from the token — there's no `workspace_id`
+    query parameter. Scopes attached to the key gate which endpoints it
+    can call (see "Security" below).
+
+    **Rate limit:** 60 requests per minute per key (per worker, in-memory
+    today; Postgres-backed in Phase 4.2.x).
+
+    **Errors:** all non-2xx responses include
+    `{ "error": "...", "code": "..." }`. Codes are stable and safe to
+    branch on; messages are not.
+  contact:
+    name: Scaliyo
+    url: https://scaliyo.com
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://utvydxqiqedaaxmmpfpf.functions.supabase.co
+    description: Production
+
+security:
+  - apiKey: []
+
+paths:
+  /v1-leads:
+    get:
+      summary: List leads in your workspace
+      operationId: listLeads
+      tags: [Leads]
+      security:
+        - apiKey: [leads.read]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [New, Contacted, Qualified, Converted, Lost]
+          description: Filter by lead.status
+      responses:
+        "200":
+          description: Page of leads
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, has_more, limit]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Lead" }
+                  next_cursor: { type: [string, "null"], format: date-time }
+                  has_more: { type: boolean }
+                  limit: { type: integer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1-sequences:
+    get:
+      summary: List email sequences in your workspace
+      operationId: listSequences
+      tags: [Campaigns]
+      security:
+        - apiKey: [campaigns.read]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, active, paused, completed, archived]
+      responses:
+        "200":
+          description: Page of sequences
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Sequence" }
+                  next_cursor: { type: [string, "null"], format: date-time }
+                  has_more: { type: boolean }
+                  limit: { type: integer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1-campaigns:
+    get:
+      summary: List email sequence runs (active "campaigns")
+      operationId: listCampaigns
+      tags: [Campaigns]
+      security:
+        - apiKey: [campaigns.read]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, processing, completed, failed, cancelled]
+      responses:
+        "200":
+          description: Page of campaign runs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Campaign" }
+                  next_cursor: { type: [string, "null"], format: date-time }
+                  has_more: { type: boolean }
+                  limit: { type: integer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1-analytics:
+    get:
+      summary: Workspace analytics summary
+      operationId: getAnalytics
+      tags: [Analytics]
+      security:
+        - apiKey: [analytics.read]
+      parameters:
+        - name: range
+          in: query
+          schema: { type: string, enum: [7d, 30d, 90d], default: 30d }
+      responses:
+        "200":
+          description: Aggregate metrics
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalyticsSummary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: scal_*
+      description: |
+        `Authorization: Bearer scal_<43chars>`. Mint at
+        https://scaliyo.com/portal/api-keys.
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string, format: date-time }
+      description: Paginate by descending `created_at`. Pass the `next_cursor` from the prior response.
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            missing:
+              value: { error: "Missing Authorization: Bearer header", code: "missing_auth" }
+            invalid:
+              value: { error: "API key invalid, expired, or revoked", code: "invalid_key" }
+    Forbidden:
+      description: API key lacks the required scope
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            scope:
+              value: { error: "Missing required scope: leads.read", code: "missing_scope", granted_scopes: ["analytics.read"] }
+    RateLimited:
+      description: Rate limit exceeded (60 req/min/key)
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: Seconds to wait before retrying.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error, code]
+      properties:
+        error: { type: string }
+        code:  { type: string }
+        granted_scopes:
+          type: array
+          items: { type: string }
+
+    Lead:
+      type: object
+      properties:
+        id:             { type: string, format: uuid }
+        first_name:     { type: [string, "null"] }
+        last_name:      { type: [string, "null"] }
+        primary_email:  { type: [string, "null"] }
+        primary_phone:  { type: [string, "null"] }
+        company:        { type: [string, "null"] }
+        title:          { type: [string, "null"] }
+        industry:       { type: [string, "null"] }
+        company_size:   { type: [string, "null"] }
+        linkedin_url:   { type: [string, "null"] }
+        location:       { type: [string, "null"] }
+        source:         { type: [string, "null"] }
+        score:          { type: integer }
+        status:         { type: string }
+        insights:       { type: [string, "null"] }
+        last_activity:  { type: [string, "null"], format: date-time }
+        created_at:     { type: string, format: date-time }
+        updated_at:     { type: string, format: date-time }
+
+    Sequence:
+      type: object
+      properties:
+        id:           { type: string, format: uuid }
+        name:         { type: string }
+        description:  { type: [string, "null"] }
+        status:       { type: string }
+        goal:         { type: [string, "null"] }
+        tone:         { type: [string, "null"] }
+        total_leads:  { type: integer }
+        total_sent:   { type: integer }
+        created_at:   { type: string, format: date-time }
+        updated_at:   { type: string, format: date-time }
+
+    Campaign:
+      type: object
+      description: An email_sequence_run.
+      properties:
+        id:               { type: string, format: uuid }
+        status:           { type: string }
+        lead_count:       { type: integer }
+        step_count:       { type: integer }
+        items_total:      { type: integer }
+        items_done:       { type: integer }
+        items_failed:     { type: integer }
+        started_at:       { type: [string, "null"], format: date-time }
+        completed_at:     { type: [string, "null"], format: date-time }
+        sequence_config:  { type: object }
+        created_at:       { type: string, format: date-time }
+        updated_at:       { type: string, format: date-time }
+
+    AnalyticsSummary:
+      type: object
+      properties:
+        range_days: { type: integer }
+        since:      { type: string, format: date-time }
+        leads:
+          type: object
+          properties:
+            total:         { type: integer }
+            new_in_range:  { type: integer }
+        sequences:
+          type: object
+          properties:
+            active:                { type: integer }
+            completed_in_range:    { type: integer }
+        email:
+          type: object
+          properties:
+            sent_in_range:    { type: integer }
+            opens_in_range:   { type: integer }
+            clicks_in_range:  { type: integer }
+        dlq:
+          type: object
+          properties:
+            count_in_range: { type: integer }
+            by_kind:        { type: object, additionalProperties: { type: integer } }
+        senders:
+          type: object
+          properties:
+            count:             { type: integer }
+            avg_health_score:  { type: [integer, "null"] }

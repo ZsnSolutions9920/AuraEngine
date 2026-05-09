@@ -96,7 +96,11 @@ const ApiKeysPage: React.FC = () => {
         </p>
         <pre className="text-xs bg-white border border-slate-200 rounded-lg p-2 mt-1 overflow-x-auto"><code>{`curl https://utvydxqiqedaaxmmpfpf.functions.supabase.co/v1-leads \\
   -H "Authorization: Bearer scal_..."`}</code></pre>
-        <p className="text-xs text-slate-500 mt-2">Rate limit: 60 requests/minute per key.</p>
+        <p className="text-xs text-slate-500 mt-2">
+          Endpoints: <code className="font-mono">v1-leads</code>, <code className="font-mono">v1-sequences</code>, <code className="font-mono">v1-campaigns</code>, <code className="font-mono">v1-analytics</code>.
+          Rate limit: 60 req/min/key.
+          {' '}<a href="https://github.com/ZsnSolutions9920/AuraEngine/blob/main/docs/api/openapi.yaml" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">OpenAPI 3.1 spec ↗</a>
+        </p>
       </div>
 
       {/* Active keys */}
