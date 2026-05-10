@@ -17,7 +17,7 @@ set -euo pipefail
 
 ENV_FILE="${ENV_FILE:-/etc/scaliyo/scaliyo.env}"
 PROVISION_SCRIPT="${PROVISION_SCRIPT:-/var/www/scaliyo/scripts/provision-vanity-domain.sh}"
-LOCK_FILE="/run/scaliyo/poll-vanity-domains.lock"
+LOCK_FILE="/tmp/scaliyo-poll-vanity-domains.lock"
 MAX_PER_TICK=5
 
 if [[ ! -r "${ENV_FILE}" ]]; then
