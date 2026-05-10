@@ -59,6 +59,22 @@ jobs:
           # Keep only last 5 releases for rollback
           $SSH_CMD $USER@$HOST "cd /var/www/scaliyo/releases && ls -1dt release-* | tail -n +6 | xargs rm -rf 2>/dev/null || true"
 
+      - name: Sync scripts/ for vanity-domain TLS automation
+        if: hashFiles('scripts/**') != ''
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        working-directory: .
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H $HOST >> ~/.ssh/known_hosts 2>/dev/null
+          SSH_CMD="ssh -i ~/.ssh/deploy_key"
+          $SSH_CMD $USER@$HOST "mkdir -p /var/www/scaliyo/scripts"
+          rsync -azq --chmod=F755 --delete -e "$SSH_CMD" scripts/ $USER@$HOST:/var/www/scaliyo/scripts/
+
       - name: Check if Nginx config changed
         id: nginx-check
         working-directory: .

@@ -13,6 +13,7 @@ import { useOutletContext } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   Palette, Upload, Save, Loader2, Image as ImageIcon, Trash2, ExternalLink,
+  Globe, ShieldCheck, AlertTriangle, Plus, RefreshCw, Copy, Check,
 } from 'lucide-react';
 import type { User } from '../../types';
 import { supabase } from '../../lib/supabase';
@@ -21,6 +22,10 @@ import {
   type WorkspaceBranding,
 } from '../../lib/branding';
 import { uploadBase64Image } from '../../lib/imageUpload';
+import {
+  listWorkspaceDomains, addWorkspaceDomain, deleteWorkspaceDomain, verifyDomain,
+  domainStatusLabel, type WorkspaceDomain,
+} from '../../lib/domains';
 
 interface LayoutContext { user: User }
 
@@ -165,6 +170,9 @@ const BrandingPage: React.FC = () => {
           mapping (your-app.acme.com) is a separate setup — coming next.
         </p>
       </header>
+
+      {/* Custom domain — Phase 4.6.b */}
+      {workspaceId && <DomainsSection workspaceId={workspaceId} />}
 
       {loading ? (
         <div className="h-96 rounded-2xl bg-slate-100 animate-pulse" />
@@ -327,5 +335,236 @@ const ColorField: React.FC<{
     </div>
   </div>
 );
+
+// ── Custom-domain section ───────────────────────────────────────────────
+
+const DomainsSection: React.FC<{ workspaceId: string }> = ({ workspaceId }) => {
+  const [domains, setDomains] = useState<WorkspaceDomain[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [verifying, setVerifying] = useState<string | null>(null);
+  const [copiedToken, setCopiedToken] = useState<string | null>(null);
+  const [verifyResult, setVerifyResult] = useState<Record<string, string>>({});
+
+  const refresh = async () => {
+    setLoading(true);
+    try { setDomains(await listWorkspaceDomains(workspaceId)); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { refresh(); }, [workspaceId]);
+
+  const handleVerify = async (id: string) => {
+    setVerifying(id);
+    setVerifyResult((s) => ({ ...s, [id]: '' }));
+    try {
+      const r = await verifyDomain(id);
+      setVerifyResult((s) => ({
+        ...s,
+        [id]: r.verified ? `Verified via ${r.method?.toUpperCase()}` : (r.error ?? 'Not yet'),
+      }));
+      await refresh();
+    } catch (e) {
+      setVerifyResult((s) => ({ ...s, [id]: (e as Error).message }));
+    } finally {
+      setVerifying(null);
+    }
+  };
+
+  const handleDelete = async (d: WorkspaceDomain) => {
+    if (!confirm(`Remove ${d.domain}? Traffic to this domain will stop working.`)) return;
+    await deleteWorkspaceDomain(d.id);
+    refresh();
+  };
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wide flex items-center gap-2">
+            <Globe size={14} className="text-indigo-500" /> Custom domain
+          </h2>
+          <p className="text-xs text-slate-500 mt-1">
+            Map a domain you control (e.g. <code className="font-mono">app.yourcompany.com</code>) to your Scaliyo workspace.
+          </p>
+        </div>
+        <button
+          onClick={() => setShowAdd(true)}
+          className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800"
+        >
+          <Plus size={12} /> Add domain
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="h-12 bg-slate-100 rounded-xl animate-pulse" />
+      ) : domains.length === 0 ? (
+        <p className="text-xs text-slate-400 italic">No custom domains yet.</p>
+      ) : (
+        <div className="space-y-2">
+          {domains.map((d) => {
+            const status = domainStatusLabel(d);
+            const txtName = `_scaliyo-verify.${d.domain}`;
+            return (
+              <div key={d.id} className="rounded-xl border border-slate-200 p-3 space-y-2">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="font-mono text-sm font-medium truncate">{d.domain}</span>
+                    <span className={`px-2 py-0.5 rounded-full bg-${status.tone}-50 text-${status.tone}-700 text-[10px] font-bold`}>
+                      {status.label}
+                    </span>
+                    {d.cert_expires_at && (
+                      <span className="text-[10px] text-slate-400 inline-flex items-center gap-1">
+                        <ShieldCheck size={10} /> renews {new Date(d.cert_expires_at).toLocaleDateString()}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1">
+                    {d.status !== 'verified' && (
+                      <button
+                        onClick={() => handleVerify(d.id)}
+                        disabled={verifying === d.id}
+                        className="px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700 text-xs font-semibold hover:bg-indigo-100 disabled:opacity-50 inline-flex items-center gap-1"
+                      >
+                        {verifying === d.id ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                        Verify
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleDelete(d)}
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                      title="Remove"
+                    ><Trash2 size={12} /></button>
+                  </div>
+                </div>
+
+                {verifyResult[d.id] && (
+                  <div className={`text-[11px] px-2 py-1 rounded ${
+                    verifyResult[d.id].startsWith('Verified') ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'
+                  }`}>
+                    {verifyResult[d.id]}
+                  </div>
+                )}
+
+                {/* DNS instructions: only show until verified */}
+                {d.status !== 'verified' && (
+                  <div className="bg-slate-50 rounded-lg p-3 space-y-2 text-xs">
+                    <p className="font-semibold text-slate-700 inline-flex items-center gap-1">
+                      <AlertTriangle size={11} className="text-amber-500" /> Add ONE of these DNS records, then click Verify
+                    </p>
+                    <div className="font-mono text-[11px] grid gap-1">
+                      <DnsRow
+                        label="TXT"
+                        host={txtName}
+                        value={d.verification_token}
+                        copied={copiedToken === d.id ? 'value' : null}
+                        onCopy={(what) => {
+                          navigator.clipboard.writeText(what === 'host' ? txtName : d.verification_token);
+                          setCopiedToken(d.id);
+                          setTimeout(() => setCopiedToken(null), 2000);
+                        }}
+                      />
+                      <p className="text-[10px] text-slate-400">— or —</p>
+                      <DnsRow
+                        label="CNAME"
+                        host={d.domain}
+                        value="app.scaliyo.com"
+                        copied={null}
+                        onCopy={(what) => {
+                          navigator.clipboard.writeText(what === 'host' ? d.domain : 'app.scaliyo.com');
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {d.last_provision_error && !d.provisioned_at && (
+                  <div className="text-[11px] bg-rose-50 text-rose-700 px-2 py-1 rounded">
+                    Provision error: {d.last_provision_error}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {showAdd && (
+        <AddDomainModal
+          workspaceId={workspaceId}
+          onClose={() => setShowAdd(false)}
+          onAdded={() => { setShowAdd(false); refresh(); }}
+        />
+      )}
+    </section>
+  );
+};
+
+const DnsRow: React.FC<{
+  label: string; host: string; value: string;
+  copied: 'host' | 'value' | null;
+  onCopy: (which: 'host' | 'value') => void;
+}> = ({ label, host, value, copied, onCopy }) => (
+  <div className="flex items-center gap-2">
+    <span className="px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 text-[10px] font-bold w-12 text-center">{label}</span>
+    <button onClick={() => onCopy('host')} className="text-slate-700 hover:text-indigo-600 truncate flex-1 text-left">
+      {host}
+    </button>
+    <span className="text-slate-400">→</span>
+    <button onClick={() => onCopy('value')} className="text-slate-700 hover:text-indigo-600 truncate flex-1 text-left">
+      {value}
+    </button>
+    <span className="text-slate-400 shrink-0">
+      {copied ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+    </span>
+  </div>
+);
+
+const AddDomainModal: React.FC<{
+  workspaceId: string; onClose: () => void; onAdded: () => void;
+}> = ({ workspaceId, onClose, onAdded }) => {
+  const [domain, setDomain] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const handleAdd = async () => {
+    setError(null);
+    if (!domain.trim()) { setError('Domain is required'); return; }
+    setBusy(true);
+    try {
+      await addWorkspaceDomain(workspaceId, domain.trim().toLowerCase());
+      onAdded();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="fixed inset-0 z-[9998] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4">
+        <h3 className="text-lg font-bold text-slate-900">Add custom domain</h3>
+        <div>
+          <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Domain</label>
+          <input
+            value={domain}
+            onChange={(e) => setDomain(e.target.value)}
+            placeholder="app.yourcompany.com"
+            className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm font-mono focus:outline-none focus:border-indigo-500"
+            autoFocus
+          />
+          <p className="text-xs text-slate-400 mt-1">After adding, you'll be shown DNS records to add at your domain registrar. The cert is issued automatically once DNS is verified.</p>
+        </div>
+        {error && <div className="text-sm text-rose-600 bg-rose-50 border border-rose-200 rounded-lg p-2">{error}</div>}
+        <div className="flex items-center gap-2 pt-2">
+          <button onClick={onClose} className="flex-1 px-4 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold hover:bg-slate-50">Cancel</button>
+          <button onClick={handleAdd} disabled={busy} className="flex-1 px-4 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800 disabled:opacity-50">
+            {busy ? 'Adding…' : 'Add domain'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 export default BrandingPage;
