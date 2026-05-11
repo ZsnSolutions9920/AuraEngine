@@ -34,7 +34,13 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
 const MAX_STEPS_PER_PLAN = 25;
-const LIVE_MODE_FLAG = "goal_executor_live";
+const LIVE_MODE_FLAG       = "goal_executor_live";
+const SEND_EMAIL_FLAG      = "goal_executor_send_email";
+const SEND_SOCIAL_FLAG     = "goal_executor_send_social";
+const GEMINI_API_KEY       = Deno.env.get("GEMINI_API_KEY") ?? "";
+const INLINE_WAIT_MAX_MS   = 30_000;             // waits ≤ 30s sleep inline; longer waits persist + cron resumes
+const ENRICH_MAX_LEADS     = 20;
+const SCORE_MAX_LEADS      = 50;
 
 interface PlanStep {
   id: string;
@@ -146,6 +152,293 @@ async function liveApolloSearch(
   }
 }
 
+// ── Gemini call (server-side, uses GEMINI_API_KEY directly) ─────────────
+
+async function geminiGenerate(prompt: string, systemInstruction: string, opts?: { responseMimeType?: string }): Promise<{ text: string; tokens: number }> {
+  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY not configured");
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=" + GEMINI_API_KEY;
+  const body = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    systemInstruction: { parts: [{ text: systemInstruction }] },
+    generationConfig: {
+      temperature: 0.5,
+      topP: 0.9,
+      ...(opts?.responseMimeType ? { responseMimeType: opts.responseMimeType } : {}),
+    },
+  };
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(`Gemini ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const j = await r.json();
+  const text = j.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+  const tokens = j.usageMetadata?.totalTokenCount ?? 0;
+  return { text, tokens };
+}
+
+// ── Live: enrich_leads ─────────────────────────────────────────────────
+//
+// Picks up to ENRICH_MAX_LEADS workspace leads with empty insights, calls
+// Gemini per lead, writes back insights. Caps to avoid runaway costs.
+
+async function liveEnrichLeads(
+  admin: ReturnType<typeof createClient>,
+  workspaceId: string,
+  step: PlanStep,
+): Promise<StepResult> {
+  try {
+    const { data: leads, error } = await admin
+      .from("leads")
+      .select("id, first_name, last_name, primary_email, company, title, linkedin_url, insights, workspace_id")
+      .eq("workspace_id", workspaceId)
+      .or("insights.is.null,insights.eq.")
+      .limit(ENRICH_MAX_LEADS);
+    if (error) return { status: "failed", output: { live: true }, error: `lead fetch failed: ${error.message}` };
+    if (!leads || leads.length === 0) {
+      return { status: "succeeded", output: { live: true, summary: "No leads needed enrichment.", enriched: 0 } };
+    }
+
+    let enriched = 0;
+    let failed = 0;
+    for (const l of leads) {
+      const prompt = `Research this B2B prospect and produce a 2-3 sentence insight on their likely pain points and the best opening hook for outreach. Return plain text, no preamble.\n\nName: ${l.first_name ?? ""} ${l.last_name ?? ""}\nTitle: ${l.title ?? "unknown"}\nCompany: ${l.company ?? "unknown"}\nEmail: ${l.primary_email ?? "(none)"}\nLinkedIn: ${l.linkedin_url ?? "(none)"}`;
+      try {
+        const { text } = await geminiGenerate(prompt, "You are a B2B sales researcher producing terse, useful prospect insights.");
+        await admin.from("leads").update({ insights: text.slice(0, 1000), updated_at: new Date().toISOString() }).eq("id", l.id);
+        enriched++;
+      } catch (e) {
+        console.warn(`[enrich] lead ${l.id} failed:`, (e as Error).message);
+        failed++;
+      }
+    }
+
+    return {
+      status: failed === leads.length ? "failed" : "succeeded",
+      output: {
+        live: true,
+        summary: `Enriched ${enriched} of ${leads.length} leads (${failed} failed). Insights written to leads.insights.`,
+        enriched, failed, total: leads.length,
+      },
+      error: failed > 0 ? `${failed} lead(s) failed enrichment — see edge fn logs.` : undefined,
+    };
+  } catch (e) {
+    return { status: "failed", output: { live: true }, error: `enrich_leads threw: ${(e as Error).message}` };
+  }
+}
+
+// ── Live: lead_score ───────────────────────────────────────────────────
+
+async function liveLeadScore(
+  admin: ReturnType<typeof createClient>,
+  workspaceId: string,
+  step: PlanStep,
+): Promise<StepResult> {
+  try {
+    const { data: leads, error } = await admin
+      .from("leads")
+      .select("id, first_name, last_name, company, title, industry, insights, score")
+      .eq("workspace_id", workspaceId)
+      .or("score.is.null,score.eq.0")
+      .limit(SCORE_MAX_LEADS);
+    if (error) return { status: "failed", output: { live: true }, error: `lead fetch failed: ${error.message}` };
+    if (!leads || leads.length === 0) {
+      return { status: "succeeded", output: { live: true, summary: "No leads needed scoring.", scored: 0 } };
+    }
+
+    let scored = 0; let failed = 0;
+    let hot = 0; let warm = 0; let cold = 0;
+    for (const l of leads) {
+      const prompt = `Score this B2B prospect 0-100 for ICP fit. Output JSON ONLY: {"score": int, "tier": "hot"|"warm"|"cold", "reason": "one sentence"}.\n\nProspect: ${l.first_name} ${l.last_name}, ${l.title} at ${l.company} (${l.industry ?? "unknown industry"}).\nInsights: ${l.insights ?? "(none)"}`;
+      try {
+        const { text } = await geminiGenerate(prompt, "You are a B2B ICP scorer. Output strict JSON only.", { responseMimeType: "application/json" });
+        const cleaned = text.replace(/^```(?:json)?\s*/, "").replace(/```\s*$/, "").trim();
+        const parsed = JSON.parse(cleaned) as { score: number; tier: string };
+        const s = Math.max(0, Math.min(100, Math.round(Number(parsed.score) || 0)));
+        await admin.from("leads").update({ score: s, updated_at: new Date().toISOString() }).eq("id", l.id);
+        scored++;
+        if (parsed.tier === "hot") hot++;
+        else if (parsed.tier === "warm") warm++;
+        else cold++;
+      } catch (e) {
+        console.warn(`[score] lead ${l.id} failed:`, (e as Error).message);
+        failed++;
+      }
+    }
+
+    return {
+      status: failed === leads.length ? "failed" : "succeeded",
+      output: {
+        live: true,
+        summary: `Scored ${scored} of ${leads.length} leads. Hot: ${hot}, Warm: ${warm}, Cold: ${cold}.`,
+        scored, failed, hot, warm, cold, total: leads.length,
+      },
+      error: failed > 0 ? `${failed} lead(s) failed scoring.` : undefined,
+    };
+  } catch (e) {
+    return { status: "failed", output: { live: true }, error: `lead_score threw: ${(e as Error).message}` };
+  }
+}
+
+// ── Live: team_task ────────────────────────────────────────────────────
+//
+// Auto-creates a workspace-scoped "AI Goals" board on first call. Inserts
+// a card into the "To Do" list of that board.
+
+async function liveTeamTask(
+  admin: ReturnType<typeof createClient>,
+  userId: string,
+  workspaceId: string,
+  step: PlanStep,
+): Promise<StepResult> {
+  const p = step.params ?? {};
+  const title = String(p.title ?? step.title ?? "Untitled task");
+  const description = (p.description as string) ?? null;
+
+  try {
+    // Find or create the "AI Goals" board for this workspace.
+    let boardId: string | null = null;
+    {
+      const { data: existing } = await admin
+        .from("teamhub_boards")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("name", "AI Goals")
+        .maybeSingle();
+      if (existing?.id) {
+        boardId = existing.id as string;
+      } else {
+        const { data: created, error: cerr } = await admin
+          .from("teamhub_boards")
+          .insert({ workspace_id: workspaceId, name: "AI Goals", created_by: userId })
+          .select("id")
+          .single();
+        if (cerr || !created) {
+          return { status: "skipped", output: { live: true, summary: `Couldn't auto-create AI Goals board: ${cerr?.message ?? "unknown"}.` }, error: cerr?.message };
+        }
+        boardId = created.id as string;
+      }
+    }
+
+    // Find or create the "To Do" list on this board.
+    let listId: string | null = null;
+    {
+      const { data: existing } = await admin
+        .from("teamhub_lists")
+        .select("id")
+        .eq("board_id", boardId)
+        .eq("name", "To Do")
+        .maybeSingle();
+      if (existing?.id) {
+        listId = existing.id as string;
+      } else {
+        const { data: created, error: cerr } = await admin
+          .from("teamhub_lists")
+          .insert({ board_id: boardId, name: "To Do", position: 0 })
+          .select("id")
+          .single();
+        if (cerr || !created) {
+          return { status: "skipped", output: { live: true, summary: `Couldn't create To Do list: ${cerr?.message ?? "unknown"}.` }, error: cerr?.message };
+        }
+        listId = created.id as string;
+      }
+    }
+
+    const { data: card, error: cardErr } = await admin
+      .from("teamhub_cards")
+      .insert({
+        board_id:    boardId,
+        list_id:     listId,
+        title,
+        description: description ?? `Created by goal executor — ${step.rationale ?? ""}`,
+        created_by:  userId,
+      })
+      .select("id")
+      .single();
+
+    if (cardErr || !card) {
+      return { status: "failed", output: { live: true }, error: `team_task insert failed: ${cardErr?.message}` };
+    }
+
+    return {
+      status: "succeeded",
+      output: {
+        live: true,
+        summary: `Created team task "${title}" on the AI Goals board.`,
+        card_id: card.id,
+        board_id: boardId,
+        list_id: listId,
+      },
+    };
+  } catch (e) {
+    return { status: "failed", output: { live: true }, error: `team_task threw: ${(e as Error).message}` };
+  }
+}
+
+// ── Live: wait ────────────────────────────────────────────────────────
+//
+// Two regimes:
+//   ≤ 30s wait: inline sleep, succeed immediately.
+//   > 30s wait: persist not_before, mark goal paused, return 'paused'
+//               sentinel so the executor exits early without processing
+//               downstream steps. The pg_cron worker (every 5 min) will
+//               re-invoke the executor in resume mode when not_before <= now().
+
+interface PausedSentinel { paused: true; not_before: string; }
+async function liveWait(step: PlanStep): Promise<StepResult | PausedSentinel> {
+  const hours = Number(step.params?.hours ?? 0);
+  const reason = String(step.params?.reason ?? "");
+  const ms = Math.max(0, hours * 3_600_000);
+
+  if (ms <= INLINE_WAIT_MAX_MS) {
+    if (ms > 0) await new Promise((r) => setTimeout(r, ms));
+    return {
+      status: "succeeded",
+      output: { live: true, summary: `Waited ${hours}h inline (≤30s) — resumed.`, hours, reason },
+    };
+  }
+
+  const notBefore = new Date(Date.now() + ms).toISOString();
+  return { paused: true, not_before: notBefore };
+}
+
+// ── Live: gated email_sequence / social_post ──────────────────────────
+
+async function liveGatedStub(
+  admin: ReturnType<typeof createClient>,
+  workspaceId: string,
+  step: PlanStep,
+  flagKey: string,
+  phaseLabel: string,
+): Promise<StepResult> {
+  const { data: flagOn } = await admin.rpc("workspace_has_flag", {
+    p_workspace_id: workspaceId,
+    p_flag_key:     flagKey,
+  });
+  if (!flagOn) {
+    return {
+      status: "skipped",
+      output: {
+        live: true,
+        gated: true,
+        summary: `"${step.kind}" requires workspace flag "${flagKey}" — not enabled. Skipped.`,
+        flag_key: flagKey,
+      },
+      error: `"${step.kind}" is gated behind the ${flagKey} workspace flag (${phaseLabel}). Enable it explicitly before this primitive will execute.`,
+    };
+  }
+
+  // Flag is on, but actual send wiring is the responsibility of a future
+  // ship — for now, log clearly that we *would* fire and ack the flag.
+  return {
+    status: "skipped",
+    output: {
+      live: true,
+      gated: false,
+      summary: `Flag "${flagKey}" is enabled but the send wiring is not yet implemented. Would have invoked: ${step.kind} with the planner's params.`,
+      params: step.params ?? {},
+    },
+    error: `Flag enabled but send wiring not yet shipped (${phaseLabel}).`,
+  };
+}
+
 async function liveCheckpoint(
   admin: ReturnType<typeof createClient>,
   workspaceId: string,
@@ -221,32 +514,28 @@ async function liveCheckpoint(
   };
 }
 
-function liveDeferredStub(step: PlanStep): StepResult {
-  const p = step.params ?? {};
-  return {
-    status: "skipped",
-    output: {
-      live: true,
-      deferred: true,
-      summary: `Live execution of "${step.kind}" is deferred to a future ship. The step did not run.`,
-      params: p,
-    },
-    error: `Live primitive "${step.kind}" is not yet implemented. Tracked as Phase 6.2.c / 6.2.d depending on kind.`,
-  };
-}
-
 async function executeStepLive(
   admin: ReturnType<typeof createClient>,
   userToken: string,
+  userId: string,
   workspaceId: string,
   goalTargetMetric: string,
   step: PlanStep,
-): Promise<StepResult> {
+): Promise<StepResult | PausedSentinel> {
   switch (step.kind) {
     case "apollo_search":  return await liveApolloSearch(admin, userToken, step);
     case "checkpoint":     return await liveCheckpoint(admin, workspaceId, goalTargetMetric, step);
-    // All others fall through to the deferred stub.
-    default:               return liveDeferredStub(step);
+    case "enrich_leads":   return await liveEnrichLeads(admin, workspaceId, step);
+    case "lead_score":     return await liveLeadScore(admin, workspaceId, step);
+    case "team_task":      return await liveTeamTask(admin, userId, workspaceId, step);
+    case "wait":           return await liveWait(step);
+    case "email_sequence": return await liveGatedStub(admin, workspaceId, step, SEND_EMAIL_FLAG, "Phase 6.2.d");
+    case "social_post":    return await liveGatedStub(admin, workspaceId, step, SEND_SOCIAL_FLAG, "Phase 6.2.d");
+    default: return {
+      status: "skipped",
+      output: { live: true, summary: `Unknown step kind "${step.kind}" — no-op.` },
+      error: `Step kind "${step.kind}" is not supported by the executor.`,
+    };
   }
 }
 
@@ -295,11 +584,12 @@ serve(async (req) => {
   if (authErr || !userRes?.user) return jsonResponse({ error: "Invalid token" }, 401, corsHeaders);
   const userId = userRes.user.id;
 
-  const body = await req.json().catch(() => ({} as { goal_id?: string; mode?: string }));
+  const body = await req.json().catch(() => ({} as { goal_id?: string; mode?: string; resume?: boolean }));
   if (!body.goal_id || typeof body.goal_id !== "string") {
     return jsonResponse({ error: "goal_id required" }, 400, corsHeaders);
   }
   const mode: Mode = body.mode === "live" ? "live" : "dry_run";
+  const resume: boolean = body.resume === true;
 
   const { data: goal, error: goalErr } = await admin
     .from("automation_goals")
@@ -353,6 +643,18 @@ serve(async (req) => {
   const ordered = topoSort(plan.steps);
   if ("error" in ordered) return jsonResponse({ error: ordered.error }, 400, corsHeaders);
 
+  // In resume mode (called by cron), pick up where we left off.
+  // Find step IDs that already have a terminal status_run row and skip them.
+  let alreadyDoneStepIds = new Set<string>();
+  if (resume) {
+    const { data: existing } = await admin
+      .from("automation_step_runs")
+      .select("step_id, status")
+      .eq("plan_id", planRow.id)
+      .in("status", ["succeeded", "skipped", "failed"]);
+    alreadyDoneStepIds = new Set((existing ?? []).map((r) => r.step_id as string));
+  }
+
   await admin.rpc("set_goal_status", { p_goal_id: goal.id, p_status: "running" });
 
   const progressIncrement = goal.target_value > 0
@@ -362,36 +664,68 @@ serve(async (req) => {
   const stepRunIds: string[] = [];
   let failures = 0;
   let skipped = 0;
+  let pausedAt: { step_id: string; not_before: string } | null = null;
 
   for (const step of ordered) {
-    const { data: inserted, error: insErr } = await admin
-      .from("automation_step_runs")
-      .insert({
-        plan_id:       planRow.id,
-        goal_id:       goal.id,
-        workspace_id:  goal.workspace_id,
-        step_id:       step.id,
-        step_kind:     step.kind,
-        status:        "running",
-        mode,
-        attempt_count: 1,
-        input_params:  step.params ?? {},
-        started_at:    new Date().toISOString(),
-      })
-      .select("id")
-      .single();
-    if (insErr || !inserted) {
-      console.error("[goal-executor] insert step run failed:", insErr?.message);
-      failures++;
-      continue;
-    }
-    stepRunIds.push(inserted.id);
+    if (alreadyDoneStepIds.has(step.id)) continue;
 
-    let result: StepResult;
+    // Insert or claim the step_run row. In resume mode, there may already
+    // be a 'pending' row for this step (the cron worker's claim transitioned
+    // it to 'running'); reuse it.
+    let stepRunId: string;
+    if (resume) {
+      const { data: existing } = await admin
+        .from("automation_step_runs")
+        .select("id")
+        .eq("plan_id", planRow.id)
+        .eq("step_id", step.id)
+        .order("attempt_count", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (existing?.id) {
+        stepRunId = existing.id;
+        await admin.from("automation_step_runs").update({ status: "running", started_at: new Date().toISOString() }).eq("id", stepRunId);
+      } else {
+        const { data: inserted, error: insErr } = await admin
+          .from("automation_step_runs")
+          .insert({
+            plan_id: planRow.id, goal_id: goal.id, workspace_id: goal.workspace_id,
+            step_id: step.id, step_kind: step.kind, status: "running", mode,
+            attempt_count: 1, input_params: step.params ?? {}, started_at: new Date().toISOString(),
+          })
+          .select("id").single();
+        if (insErr || !inserted) { failures++; continue; }
+        stepRunId = inserted.id;
+      }
+    } else {
+      const { data: inserted, error: insErr } = await admin
+        .from("automation_step_runs")
+        .insert({
+          plan_id: planRow.id, goal_id: goal.id, workspace_id: goal.workspace_id,
+          step_id: step.id, step_kind: step.kind, status: "running", mode,
+          attempt_count: 1, input_params: step.params ?? {}, started_at: new Date().toISOString(),
+        })
+        .select("id").single();
+      if (insErr || !inserted) { failures++; continue; }
+      stepRunId = inserted.id;
+    }
+    stepRunIds.push(stepRunId);
+
+    let result: StepResult | PausedSentinel;
     if (mode === "live") {
-      result = await executeStepLive(admin, userToken, goal.workspace_id, goal.target_metric, step);
+      result = await executeStepLive(admin, userToken, userId, goal.workspace_id, goal.target_metric, step);
     } else {
       result = dryRunStub(step);
+    }
+
+    // Paused sentinel from liveWait: persist not_before and stop the loop.
+    if ("paused" in result && result.paused) {
+      await admin.from("automation_step_runs").update({
+        status: "pending", not_before: result.not_before, started_at: null,
+        output: { live: true, paused: true, summary: `Paused — will resume at ${result.not_before}.`, not_before: result.not_before },
+      }).eq("id", stepRunId);
+      pausedAt = { step_id: step.id, not_before: result.not_before };
+      break;
     }
 
     if (result.status === "failed") failures++;
@@ -405,7 +739,7 @@ serve(async (req) => {
         error:        result.error ?? null,
         completed_at: new Date().toISOString(),
       })
-      .eq("id", inserted.id);
+      .eq("id", stepRunId);
 
     if (progressIncrement > 0 && result.status === "succeeded") {
       await admin.rpc("advance_goal_progress", {
@@ -415,15 +749,22 @@ serve(async (req) => {
     }
   }
 
-  const finalStatus = failures === 0 ? "completed" : "failed";
+  let finalStatus: string;
+  if (pausedAt) {
+    finalStatus = "paused";
+  } else {
+    finalStatus = failures === 0 ? "completed" : "failed";
+  }
   await admin.rpc("set_goal_status", { p_goal_id: goal.id, p_status: finalStatus });
 
   return jsonResponse({
     goal_id:       goal.id,
     plan_id:       planRow.id,
     mode,
+    resume,
+    paused_at:     pausedAt,
     steps_total:   ordered.length,
-    steps_succeeded: ordered.length - failures - skipped,
+    steps_succeeded: stepRunIds.length - failures - skipped - (pausedAt ? 1 : 0),
     steps_skipped: skipped,
     steps_failed:  failures,
     step_run_ids:  stepRunIds,

@@ -56,6 +56,10 @@ This document tracks the phased rollout. Phase 1 is shipped in code on this bran
 | Phase 6.1 — Goal-based AI automation: storage layer (`automation_goals` + versioned `automation_plans` + `store_plan_version` RPC), LLM planner (`generateGoalPlan` with 8 canonical primitives + JSON response schema + memory-context injection), `/portal/goals` UI with create modal, expandable plan panel, version history. Executor / Observer / Memory-feedback loop are 6.2+. | `supabase/migrations/20260511100000_automation_goals.sql` + `lib/goals.ts` + `pages/portal/GoalsPage.tsx` + `App.tsx` route + `lib/navConfig.ts` (added "Goals" under CONVERT pillar) | ✅ |
 | Phase 6.2.a — Dry-run executor: `automation_step_runs` table, `goal-executor` edge fn (topo-sort + per-step stub handlers, all 8 primitives simulated, `live` mode 403'd), `runPlanPreview` lib helper, "Run preview" button + per-step status pills in `/portal/goals`. Zero real side effects — Phase 6.2.b wires safe primitives for real. | `supabase/migrations/20260511200000_automation_step_runs.sql` + `supabase/functions/goal-executor/` + `lib/goals.ts` + `pages/portal/GoalsPage.tsx` | ✅ |
 | Phase 6.2.b — Live executor (partial): `workspace_feature_flags` table + `workspace_has_flag` RPC; goal-executor live mode gated on `goal_executor_live` flag; real Apollo search + checkpoint evaluation; other primitives stubbed with explicit "deferred" messages. UI: live toggle in header (with confirm) + "Run live" button on goal cards. | `supabase/migrations/20260511300000_workspace_feature_flags.sql` + `supabase/functions/goal-executor/index.ts` rewrite + `lib/goals.ts` + `pages/portal/GoalsPage.tsx` | ✅ |
+| Phase 6.2.c — Remaining safe primitives: `enrich_leads` (Gemini per lead, cap 20), `lead_score` (Gemini ICP with JSON response, cap 50), `team_task` (auto-creates "AI Goals" board + "To Do" list, inserts card), `wait` (≤30s inline / longer persists not_before + paused goal + cron resume). New `claim_resumable_goal_step_runs` RPC + `resume-paused-goals` pg_cron (every 5 min) + executor resume mode. | `supabase/migrations/20260511400000_phase_6_2_c.sql` + `supabase/functions/goal-executor/index.ts` rewrite | ✅ |
+| Phase 6.2.d (skeleton) — `email_sequence` + `social_post` routed through gate check on `goal_executor_send_email` / `goal_executor_send_social` workspace flags. Both still stubbed (no actual send) — next ship wires the real send path. | `supabase/functions/goal-executor/index.ts` `liveGatedStub` | ✅ |
+| Phase 6.3 (skeleton) — Hourly `observe-goal-drift` pg_cron detects 3 drift kinds (past_due_with_unmet_target, paused_too_long, stalled_running) and writes `workspace_memory(kind='observation')` rows. 24h de-dup. | `supabase/migrations/20260511500000_goal_observer.sql` | ✅ |
+| Phase 6.4 — Memory feedback loop: `log_goal_outcome_to_memory` TRIGGER on `automation_goals` status → terminal, writes `winning_pattern` (completed) or `avoid` (failed/cancelled) to `workspace_memory` with plan summary + step-run aggregate. Confidence weighted by step count. `generateGoalPlan` already reads these — the loop is closed. | `supabase/migrations/20260511400000_phase_6_2_c.sql` (trigger lives here for cohesion with 6.2.c migration) | ✅ |
 
 **Why these and not others.** Phase 1 had to be additive and reversible. Memory is foundational (everything in Phase 2 builds on it). Navigation pillars set the product story. Mission Control proves the AI-native pattern without removing the existing dashboard. Centralised AI config removes the friction tax on every future model upgrade. Nothing here touches the email send path, billing, RLS posture, or existing user data.
 
@@ -414,17 +418,68 @@ are: (1) one or more Apollo API calls (consuming the workspace's
 Apollo credits), and (2) read-only metric queries for checkpoint
 evaluation.
 
-### Phase 6.2.c — Remaining safe primitives (NOT YET)
+### Phase 6.2.c — Remaining safe primitives (✅ shipped 2026-05-11)
 
-Wires real implementations for the four primitives still stubbed in
-live mode:
-  enrich_leads    Gemini-via-edge-fn for each lead batch
-  lead_score      Gemini ICP scoring
-  team_task       teamhub_cards insert (needs default board/list mapping)
-  wait            persistent scheduling via cron worker (the long-pole
-                  for plans spanning days/weeks)
+All four primitives wired for real execution behind the
+`goal_executor_live` flag:
 
-`email_sequence` and `social_post` STILL stubbed pending 6.2.d gates.
+| Primitive | Implementation |
+|---|---|
+| `enrich_leads` | Picks up to 20 leads with empty `insights`; calls Gemini per lead with a B2B research prompt; writes back to `leads.insights`. |
+| `lead_score` | Picks up to 50 unscored leads; Gemini ICP scoring with strict JSON response; writes `leads.score` + tracks hot/warm/cold counts. |
+| `team_task` | Auto-creates a workspace "AI Goals" board + "To Do" list on first use; inserts a `teamhub_cards` row with the planner's title + description. |
+| `wait` | ≤30s waits sleep inline. Longer waits persist `not_before` on the step run, transition the goal to `paused`, and exit. A pg_cron worker (`resume-paused-goals`, every 5 min) detects ready steps via `claim_resumable_goal_step_runs` and re-invokes the executor in resume mode. |
+
+Resume mode is supported by the executor itself: with `body.resume=true`,
+it skips step_runs that already have a terminal status, then continues
+from the first `pending` step (the one the cron just claimed).
+
+### Phase 6.2.d — email_sequence + social_post gates (skeleton ✅ shipped)
+
+Two new feature flags reserved:
+  `goal_executor_send_email`
+  `goal_executor_send_social`
+
+Live executor now routes these primitives through `liveGatedStub()`:
+  - Flag off: `skipped` with "requires workspace flag X" error blurb
+  - Flag on: `skipped` with "flag enabled but send wiring not yet shipped"
+
+This is honest about the boundary: enabling the flag is opt-in, but
+actual send wiring is the next-session ship. No customer can
+accidentally send emails today.
+
+### Phase 6.3 — Observer (skeleton ✅ shipped 2026-05-11)
+
+Hourly `observe-goal-drift` pg_cron job scans active / running / paused
+goals and detects three drift signals:
+  - `past_due_with_unmet_target` — past `due_at` with progress < target
+  - `paused_too_long` — paused > 12h (cron resume should have unstuck)
+  - `stalled_running` — running but no step_run completion in 6h
+
+Each observation writes a `workspace_memory(kind='observation')` row,
+de-duped per goal+kind on a 24h window. The next planner / replanner
+call reads these via `buildMemoryContext`.
+
+### Phase 6.3.b — LLM replanner (NOT YET)
+
+The auto-replan loop: when an observation indicates drift, generate a
+new plan version with the prior plan + actual outcomes + observations
+in context. Mark prior `is_active=false` with `superseded_reason='replan'`.
+
+### Phase 6.4 — Memory feedback loop (✅ shipped 2026-05-11)
+
+`log_goal_outcome_to_memory()` TRIGGER fires on
+`automation_goals.status` transitions to a terminal state. Writes a
+`workspace_memory` row with `kind='winning_pattern'` (completed) or
+`kind='avoid'` (failed/cancelled), payload includes the plan summary,
+step-run aggregate counts, and the goal's target metric.
+
+Confidence weighted by step count (≥5 = 0.85, ≥3 = 0.70, else 0.55) so
+the planner trusts longer-run outcomes more.
+
+Future `generateGoalPlan` calls already pull
+`kind=winning_pattern + avoid` via `buildMemoryContext` — the loop is
+fully closed.
 
 ### Phase 6.3 — Observer + Replanner (NOT YET)
 
