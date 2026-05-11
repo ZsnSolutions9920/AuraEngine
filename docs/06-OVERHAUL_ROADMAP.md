@@ -54,6 +54,7 @@ This document tracks the phased rollout. Phase 1 is shipped in code on this bran
 | OpenAPI 3.1 spec extended with the new endpoints + `IdempotencyKey` parameter + `BadRequest`/`Conflict` responses + `LeadCreate`/`LeadPatch`/`SequenceCreate`/`SequencePatch` schemas | `docs/api/openapi.yaml` | ✅ |
 | `/portal/api-docs` in-app API reference page — bespoke renderer with curl-runnable examples, method-color badges, scope chips, copy-to-clipboard, error-code table. Cross-linked from `/portal/api-keys`. | `pages/portal/ApiDocsPage.tsx` + `App.tsx` route | ✅ |
 | Phase 6.1 — Goal-based AI automation: storage layer (`automation_goals` + versioned `automation_plans` + `store_plan_version` RPC), LLM planner (`generateGoalPlan` with 8 canonical primitives + JSON response schema + memory-context injection), `/portal/goals` UI with create modal, expandable plan panel, version history. Executor / Observer / Memory-feedback loop are 6.2+. | `supabase/migrations/20260511100000_automation_goals.sql` + `lib/goals.ts` + `pages/portal/GoalsPage.tsx` + `App.tsx` route + `lib/navConfig.ts` (added "Goals" under CONVERT pillar) | ✅ |
+| Phase 6.2.a — Dry-run executor: `automation_step_runs` table, `goal-executor` edge fn (topo-sort + per-step stub handlers, all 8 primitives simulated, `live` mode 403'd), `runPlanPreview` lib helper, "Run preview" button + per-step status pills in `/portal/goals`. Zero real side effects — Phase 6.2.b wires safe primitives for real. | `supabase/migrations/20260511200000_automation_step_runs.sql` + `supabase/functions/goal-executor/` + `lib/goals.ts` + `pages/portal/GoalsPage.tsx` | ✅ |
 
 **Why these and not others.** Phase 1 had to be additive and reversible. Memory is foundational (everything in Phase 2 builds on it). Navigation pillars set the product story. Mission Control proves the AI-native pattern without removing the existing dashboard. Centralised AI config removes the friction tax on every future model upgrade. Nothing here touches the email send path, billing, RLS posture, or existing user data.
 
@@ -362,16 +363,49 @@ specific automation primitives, and review/replan if the plan looks
 off. The plan is descriptive only — no automation runs from it until
 6.2.
 
-### Phase 6.2 — Executor (NOT YET — own session)
+### Phase 6.2.a — Dry-run executor (✅ shipped 2026-05-11)
 
-Walks an active plan, dispatches each step's `kind` to the
-corresponding existing primitive (Apollo search → /apollo-search edge
-fn; email_sequence → /start-email-sequence-run; etc). Persists step
-state, output references, and progress. Feeds `automation_goals.progress_value`.
+The orchestrator skeleton with all primitives stubbed. Zero real
+side effects: no Apollo searches, no email sends, no social posts.
+Lets customers see step-by-step what an active plan WOULD do,
+validating planner output before Phase 6.2.b wires real execution.
 
-**Blast radius:** highest in the codebase — this is the orchestrator
-that runs against live customer data. Build behind a feature flag,
-opt-in only.
+| Component | File / Object |
+|---|---|
+| `automation_step_runs` table (service-role write only; users see status via SELECT-only policy) | `supabase/migrations/20260511200000_automation_step_runs.sql` |
+| `set_goal_status` + `advance_goal_progress` RPCs | same migration |
+| `goal-executor` edge function: topo-sort steps, walk in dep order, write step run rows | `supabase/functions/goal-executor/` |
+| 8 primitive stub handlers (apollo_search, enrich_leads, lead_score, email_sequence, social_post, team_task, wait, checkpoint) returning shaped "would have done X" payloads | same edge fn |
+| `live` mode explicitly rejected with 403 `live_not_enabled` (gated until 6.2.b) | same edge fn |
+| `lib/goals.ts` `runPlanPreview()` + `listStepRunsForPlan()` + `AutomationStepRun` type | `lib/goals.ts` |
+| `/portal/goals` "Run preview" button + per-step status pill + preview output rendering | `pages/portal/GoalsPage.tsx` |
+| Goal status state expanded: `running` added | migration ALTER + lib type |
+
+**Safety posture:** the executor never invokes another edge function,
+never writes to leads / email_messages / email_sequence_runs / any
+prospect-facing table. The only mutations are on
+`automation_step_runs` (its own state) and `automation_goals`
+(status + progress). Service-role-only writes prevent client-side
+fabrication of "this step succeeded".
+
+### Phase 6.2.b — Live executor (NOT YET — own session)
+
+Replaces the safe primitive stubs with real invocations:
+  apollo_search   → existing apollo-search edge fn
+  enrich_leads    → AI research path
+  lead_score      → existing scoring
+  team_task       → team_hub_items insert
+  wait            → schedule next-run-after via cron
+  checkpoint      → query the metric, compare, pause goal on miss
+
+`email_sequence` and `social_post` REMAIN STUBBED in 6.2.b — they
+go behind a per-workspace `workspace_memory feature_flag` row that
+the customer (not the planner) toggles. Live email sends from a
+plan are 6.2.c territory.
+
+**Blast radius:** the moment 6.2.b ships, an active plan executes
+against real prospect data. Build behind a feature flag, opt-in
+only for design-partner customers.
 
 ### Phase 6.3 — Observer + Replanner (NOT YET)
 

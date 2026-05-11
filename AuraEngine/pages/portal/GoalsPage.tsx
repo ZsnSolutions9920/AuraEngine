@@ -4,19 +4,21 @@
 // List goals, create new ones, view their AI-generated plan + version
 // history. No execution yet — that's Phase 6.2.
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   Target, Plus, Trash2, Sparkles, Loader2, AlertCircle, CheckCircle,
-  Clock, TrendingUp, ChevronDown, ChevronRight, RefreshCw,
+  Clock, TrendingUp, ChevronDown, ChevronRight, RefreshCw, Play, XCircle,
 } from 'lucide-react';
 import type { User } from '../../types';
 import { supabase } from '../../lib/supabase';
 import {
   listGoals, createGoal, deleteGoal, getActivePlan, listPlanVersions,
   planAndStoreFromGoal,
+  listStepRunsForPlan, runPlanPreview,
   type AutomationGoal, type AutomationPlanRow, type PlanStep,
+  type AutomationStepRun,
 } from '../../lib/goals';
 
 interface LayoutContext { user: User }
@@ -32,22 +34,24 @@ const METRIC_PRESETS = [
   'reactivated_leads',
 ];
 
-const STATUS_TONE: Record<AutomationGoal['status'], string> = {
+const STATUS_TONE: Record<string, string> = {
   draft:      'slate',
   planning:   'indigo',
   planned:    'emerald',
   active:     'emerald',
+  running:    'indigo',
   paused:     'amber',
   completed:  'emerald',
   cancelled:  'slate',
   failed:     'rose',
 };
 
-const STATUS_LABEL: Record<AutomationGoal['status'], string> = {
+const STATUS_LABEL: Record<string, string> = {
   draft:      'Draft',
   planning:   'AI Planning…',
   planned:    'Planned',
   active:     'Active',
+  running:    'Running…',
   paused:     'Paused',
   completed:  'Completed',
   cancelled:  'Cancelled',
@@ -113,6 +117,21 @@ const GoalsPage: React.FC = () => {
     refresh();
   };
 
+  const handleRunPreview = async (g: AutomationGoal) => {
+    try {
+      const result = await runPlanPreview(g.id);
+      await refresh();
+      setExpanded(g.id);
+      const msg = result.steps_failed === 0
+        ? `Preview complete · ${result.steps_succeeded} of ${result.steps_total} steps simulated.`
+        : `Preview finished with ${result.steps_failed} failed step(s).`;
+      // Soft surface; the per-step output is already visible in the panel.
+      console.log('[goals]', msg);
+    } catch (e) {
+      alert(`Preview failed: ${(e as Error).message}`);
+    }
+  };
+
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto space-y-6">
       <header className="flex items-start justify-between gap-4 flex-wrap">
@@ -166,6 +185,7 @@ const GoalsPage: React.FC = () => {
               planning={planning === g.id}
               onExpand={() => setExpanded(expanded === g.id ? null : g.id)}
               onPlan={() => handlePlan(g)}
+              onRunPreview={() => handleRunPreview(g)}
               onDelete={() => handleDelete(g)}
             />
           ))}
@@ -196,8 +216,10 @@ const GoalCard: React.FC<{
   planning: boolean;
   onExpand: () => void;
   onPlan: () => void;
+  onRunPreview: () => void;
   onDelete: () => void;
-}> = ({ goal: g, expanded, planning, onExpand, onPlan, onDelete }) => {
+}> = ({ goal: g, expanded, planning, onExpand, onPlan, onRunPreview, onDelete }) => {
+  const [previewing, setPreviewing] = useState(false);
   const tone = STATUS_TONE[g.status];
   const pct = g.target_value > 0
     ? Math.min(100, Math.round((g.progress_value / g.target_value) * 100))
@@ -239,7 +261,7 @@ const GoalCard: React.FC<{
         </div>
 
         <div className="flex items-center gap-1">
-          {(g.status === 'draft' || g.status === 'planned') && (
+          {(g.status === 'draft' || g.status === 'planned' || g.status === 'completed' || g.status === 'failed') && (
             <button
               onClick={onPlan}
               disabled={planning}
@@ -247,7 +269,18 @@ const GoalCard: React.FC<{
               title="Generate a fresh plan"
             >
               {planning ? <Loader2 size={11} className="animate-spin" /> : <Sparkles size={11} />}
-              {g.status === 'planned' ? 'Replan' : 'Plan'}
+              {g.status === 'draft' ? 'Plan' : 'Replan'}
+            </button>
+          )}
+          {(g.status === 'planned' || g.status === 'completed' || g.status === 'failed') && (
+            <button
+              onClick={async () => { setPreviewing(true); try { await onRunPreview(); } finally { setPreviewing(false); } }}
+              disabled={previewing}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 text-xs font-semibold hover:bg-emerald-100 disabled:opacity-50"
+              title="Simulate execution end-to-end (no real side effects)"
+            >
+              {previewing ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
+              Run preview
             </button>
           )}
           <button
@@ -276,6 +309,22 @@ const PlanPanel: React.FC<{ goalId: string }> = ({ goalId }) => {
     queryFn: () => listPlanVersions(goalId),
     staleTime: 10_000,
   });
+  // Step run state for the currently-active plan
+  const { data: stepRuns = [] } = useQuery<AutomationStepRun[]>({
+    queryKey: ['step-runs', plan?.id],
+    queryFn: () => plan ? listStepRunsForPlan(plan.id) : Promise.resolve([]),
+    enabled: !!plan?.id,
+    staleTime: 5_000,
+  });
+  // Index by step_id for fast lookup inside StepRow
+  const runsByStep = useMemo(() => {
+    const m: Record<string, AutomationStepRun> = {};
+    for (const r of stepRuns) {
+      // Keep latest attempt
+      if (!m[r.step_id] || r.attempt_count > m[r.step_id].attempt_count) m[r.step_id] = r;
+    }
+    return m;
+  }, [stepRuns]);
 
   if (isLoading) return <div className="border-t border-slate-100 p-5 text-xs text-slate-400">Loading plan…</div>;
   if (!plan) return (
@@ -303,7 +352,9 @@ const PlanPanel: React.FC<{ goalId: string }> = ({ goalId }) => {
       </header>
 
       <ol className="space-y-2">
-        {plan.plan.steps.map((s, i) => <StepRow key={s.id} step={s} index={i} />)}
+        {plan.plan.steps.map((s, i) => (
+          <StepRow key={s.id} step={s} index={i} run={runsByStep[s.id]} />
+        ))}
       </ol>
 
       {plan.plan.risks?.length > 0 && (
@@ -358,8 +409,19 @@ const KIND_BADGE: Record<string, { tone: string; label: string }> = {
   checkpoint:      { tone: 'rose',    label: 'Checkpoint' },
 };
 
-const StepRow: React.FC<{ step: PlanStep; index: number }> = ({ step: s, index }) => {
+const RUN_TONE: Record<AutomationStepRun['status'], string> = {
+  pending:   'slate',
+  running:   'indigo',
+  succeeded: 'emerald',
+  failed:    'rose',
+  skipped:   'slate',
+};
+
+const StepRow: React.FC<{
+  step: PlanStep; index: number; run?: AutomationStepRun;
+}> = ({ step: s, index, run }) => {
   const badge = KIND_BADGE[s.kind] ?? { tone: 'slate', label: s.kind };
+  const runTone = run ? RUN_TONE[run.status] : null;
   return (
     <li className="rounded-xl border border-slate-200 bg-white p-3">
       <div className="flex items-start gap-3">
@@ -372,6 +434,14 @@ const StepRow: React.FC<{ step: PlanStep; index: number }> = ({ step: s, index }
               {badge.label}
             </span>
             <span className="text-sm font-semibold text-slate-900">{s.title}</span>
+            {run && (
+              <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-${runTone}-50 text-${runTone}-700`}>
+                {run.status === 'running'   && <Loader2  size={9} className="animate-spin" />}
+                {run.status === 'succeeded' && <CheckCircle size={9} />}
+                {run.status === 'failed'    && <XCircle size={9} />}
+                {run.status}{run.mode === 'dry_run' ? ' · preview' : ''}
+              </span>
+            )}
             {s.estimated_hours != null && (
               <span className="text-[10px] text-slate-400">~{s.estimated_hours}h</span>
             )}
@@ -384,6 +454,17 @@ const StepRow: React.FC<{ step: PlanStep; index: number }> = ({ step: s, index }
             <p className="text-[11px] text-slate-500 mt-1 inline-flex items-center gap-1">
               <CheckCircle size={11} className="text-emerald-500" />
               {s.success_criteria}
+            </p>
+          )}
+          {run?.output?.summary && (
+            <p className="mt-2 text-[11px] bg-slate-50 border border-slate-100 rounded p-2 text-slate-700">
+              <span className="font-semibold">{run.mode === 'dry_run' ? 'Preview:' : 'Result:'}</span>{' '}
+              {String(run.output.summary)}
+            </p>
+          )}
+          {run?.error && (
+            <p className="mt-1 text-[11px] text-amber-700 inline-flex items-center gap-1">
+              <AlertCircle size={11} /> {run.error}
             </p>
           )}
         </div>

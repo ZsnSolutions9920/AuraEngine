@@ -61,7 +61,7 @@ export interface AutomationGoal {
   target_value: number;
   progress_value: number;
   due_at: string | null;
-  status: 'draft' | 'planning' | 'planned' | 'active' | 'paused' | 'completed' | 'cancelled' | 'failed';
+  status: 'draft' | 'planning' | 'planned' | 'active' | 'running' | 'paused' | 'completed' | 'cancelled' | 'failed';
   guardrails: string | null;
   created_at: string;
   updated_at: string;
@@ -394,3 +394,56 @@ export async function planAndStoreFromGoal(opts: {
 }
 
 export { resolveWorkspaceForUser };
+
+// ── Step runs (Phase 6.2.a) ──────────────────────────────────────────────
+
+export interface AutomationStepRun {
+  id: string;
+  plan_id: string;
+  goal_id: string;
+  workspace_id: string;
+  step_id: string;
+  step_kind: string;
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped';
+  mode: 'dry_run' | 'live';
+  attempt_count: number;
+  input_params: unknown;
+  output: { dry_run?: boolean; summary?: string; [k: string]: unknown } | null;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+}
+
+export async function listStepRunsForPlan(planId: string): Promise<AutomationStepRun[]> {
+  const { data, error } = await supabase
+    .from('automation_step_runs')
+    .select('*')
+    .eq('plan_id', planId)
+    .order('created_at', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as AutomationStepRun[];
+}
+
+/**
+ * Phase 6.2.a — invoke the goal-executor edge function in dry-run mode.
+ * Walks the active plan, simulates each primitive, stores per-step output.
+ * Returns the summary from the executor.
+ */
+export async function runPlanPreview(goalId: string): Promise<{
+  goal_id: string;
+  plan_id: string;
+  mode: 'dry_run';
+  steps_total: number;
+  steps_succeeded: number;
+  steps_failed: number;
+  step_run_ids: string[];
+  final_status: 'completed' | 'failed';
+}> {
+  const { data, error } = await supabase.functions.invoke('goal-executor', {
+    body: { goal_id: goalId, mode: 'dry_run' },
+  });
+  if (error) throw new Error(error.message ?? 'goal-executor invocation failed');
+  if ((data as { error?: string })?.error) throw new Error((data as { error: string }).error);
+  return data;
+}
