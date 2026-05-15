@@ -24,7 +24,7 @@ const MENU_SECTIONS: { title: string; items: MenuItem[] }[] = [
   {
     title: 'Tools',
     items: [
-      { label: 'Goals', icon: Target, path: '/portal/goals', color: 'indigo' },
+      { label: 'Goals', icon: Target, path: '/portal/mobile/goals', color: 'indigo' },
       { label: 'Reports', icon: PieChart, path: '/portal/analytics', color: 'indigo' },
       { label: 'AI Assistant', icon: MessageSquare, path: '/portal/ai', color: 'violet' },
       { label: 'Tasks', icon: Zap, path: '/portal/strategy', color: 'amber' },

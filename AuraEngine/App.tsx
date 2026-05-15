@@ -67,6 +67,7 @@ const MobileLeadDetail = lazy(() => import('./pages/portal/mobile/MobileLeadDeta
 const MobileCampaigns = lazy(() => import('./pages/portal/mobile/MobileCampaigns'));
 const MobileActivity = lazy(() => import('./pages/portal/mobile/MobileActivity'));
 const MobileMore = lazy(() => import('./pages/portal/mobile/MobileMore'));
+const MobileGoals = lazy(() => import('./pages/portal/mobile/MobileGoals'));
 const ModelTraining = lazy(() => import('./pages/portal/ModelTraining'));
 const IntegrationHub = lazy(() => import('./pages/portal/IntegrationHub'));
 const InvoicesPage = lazy(() => import('./pages/portal/InvoicesPage'));
@@ -297,6 +298,7 @@ const App: React.FC = () => {
             <Route path="leads/:leadId" element={<MobileLeadDetail />} />
             <Route path="campaigns" element={<MobileCampaigns />} />
             <Route path="activity" element={<MobileActivity />} />
+            <Route path="goals" element={<MobileGoals />} />
             <Route path="more" element={<MobileMore />} />
           </Route>
 
