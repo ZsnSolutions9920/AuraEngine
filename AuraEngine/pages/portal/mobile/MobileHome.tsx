@@ -11,6 +11,7 @@ import { normalizeLeads } from '../../../lib/queries';
 import { resolvePlanName, TIER_LIMITS } from '../../../lib/credits';
 import { generateProgrammaticInsights } from '../../../lib/insights';
 import { fetchOwnerEmailPerformance } from '../../../lib/emailTracking';
+import { resolveWorkspaceForUser } from '../../../lib/memory';
 import type { User, Lead, AIInsight, DashboardQuickStats } from '../../../types';
 import type { Job } from '../../../lib/jobs';
 
@@ -70,10 +71,12 @@ const MobileHome: React.FC = () => {
   // ─── Fetch all data ───
   const fetchLeads = useCallback(async () => {
     setLoadingLeads(true);
+    const workspaceId = await resolveWorkspaceForUser(user.id);
+    if (!workspaceId) { setLoadingLeads(false); return; }
     const { data } = await supabase
       .from('leads')
       .select('*')
-      .eq('client_id', user.id)
+      .eq('workspace_id', workspaceId)
       .order('score', { ascending: false })
       .order('updated_at', { ascending: false });
     if (data) {
@@ -87,14 +90,16 @@ const MobileHome: React.FC = () => {
   const fetchQuickStats = useCallback(async () => {
     setStatsLoading(true);
     try {
+      const workspaceId = await resolveWorkspaceForUser(user.id);
+      if (!workspaceId) { setStatsLoading(false); return; }
       const now = new Date();
       const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
       const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).toISOString();
 
       const [{ data: allLeads }, { count: leadsToday }, { count: leadsYesterday }, { count: contentCreated }] = await Promise.all([
-        supabase.from('leads').select('*').eq('client_id', user.id),
-        supabase.from('leads').select('id', { count: 'exact', head: true }).eq('client_id', user.id).gte('created_at', todayStart),
-        supabase.from('leads').select('id', { count: 'exact', head: true }).eq('client_id', user.id).gte('created_at', yesterdayStart).lt('created_at', todayStart),
+        supabase.from('leads').select('*').eq('workspace_id', workspaceId),
+        supabase.from('leads').select('id', { count: 'exact', head: true }).eq('workspace_id', workspaceId).gte('created_at', todayStart),
+        supabase.from('leads').select('id', { count: 'exact', head: true }).eq('workspace_id', workspaceId).gte('created_at', yesterdayStart).lt('created_at', todayStart),
         supabase.from('ai_usage_logs').select('id', { count: 'exact', head: true }).eq('user_id', user.id),
       ]);
 

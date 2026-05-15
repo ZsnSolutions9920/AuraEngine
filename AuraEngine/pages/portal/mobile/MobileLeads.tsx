@@ -4,6 +4,7 @@ import { Search, Filter, ChevronRight } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../../../lib/supabase';
 import { cacheKeys, staleTimes } from '../../../lib/cacheKeys';
+import { resolveWorkspaceForUser } from '../../../lib/memory';
 import type { User, Lead } from '../../../types';
 
 interface LayoutContext {
@@ -22,10 +23,12 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 async function fetchLeads(userId: string): Promise<Lead[]> {
+  const workspaceId = await resolveWorkspaceForUser(userId);
+  if (!workspaceId) return [];
   const { data } = await supabase
     .from('leads')
     .select('id, first_name, last_name, company, score, status, primary_email, primary_phone, created_at, last_activity, source')
-    .eq('client_id', userId)
+    .eq('workspace_id', workspaceId)
     .order('score', { ascending: false })
     .limit(200);
   return (data ?? []) as Lead[];
