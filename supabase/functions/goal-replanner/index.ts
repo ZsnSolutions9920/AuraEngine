@@ -30,6 +30,12 @@ import { getCorsHeaders, handleCors } from "../_shared/cors.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+// Supabase migrated this project to the new sb_secret_* key format,
+// which gets auto-bound to SUPABASE_SERVICE_ROLE_KEY at edge-fn runtime.
+// pg_cron callers still use the legacy JWT (stored in vault). Accept
+// either so both paths work without forcing a coordinated rotation.
+const LEGACY_SERVICE_ROLE_KEY = Deno.env.get("LEGACY_SERVICE_ROLE_KEY") ?? "";
+const ACCEPTED_SERVICE_TOKENS = [SUPABASE_SERVICE_ROLE_KEY, LEGACY_SERVICE_ROLE_KEY].filter(Boolean);
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
 
 const COOLDOWN_HOURS = 6;
@@ -115,7 +121,7 @@ serve(async (req) => {
   const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
   // Two callers: user JWT (manual replan from UI) OR service-role (cron sweep).
-  const isServiceRole = token === SUPABASE_SERVICE_ROLE_KEY;
+  const isServiceRole = ACCEPTED_SERVICE_TOKENS.includes(token);
   let userId: string | null = null;
   if (!isServiceRole) {
     const { data: userRes, error: authErr } = await admin.auth.getUser(token);

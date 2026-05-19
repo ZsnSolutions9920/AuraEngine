@@ -33,6 +33,12 @@ import { getCorsHeaders, handleCors } from "../_shared/cors.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+// Legacy-JWT fallback — pg_cron callers send the legacy service-role JWT
+// (the new sb_secret_* format auto-bound to SUPABASE_SERVICE_ROLE_KEY
+// doesn't match what the vault stores). Accept either.
+const LEGACY_SERVICE_ROLE_KEY = Deno.env.get("LEGACY_SERVICE_ROLE_KEY") ?? "";
+const ACCEPTED_SERVICE_TOKENS = [SUPABASE_SERVICE_ROLE_KEY, LEGACY_SERVICE_ROLE_KEY].filter(Boolean);
+function isServiceRoleToken(t: string): boolean { return ACCEPTED_SERVICE_TOKENS.includes(t); }
 
 const MAX_STEPS_PER_PLAN = 25;
 const LIVE_MODE_FLAG       = "goal_executor_live";
@@ -530,7 +536,7 @@ async function liveEmailSequence(
   }
 
   // Cron-resume path can't authenticate to start-email-sequence-run as a user.
-  if (userToken === SUPABASE_SERVICE_ROLE_KEY) {
+  if (isServiceRoleToken(userToken)) {
     return {
       status: "skipped",
       output: { live: true, summary: "email_sequence step skipped on cron-resume path (requires user-initiated run for plan-limit checks)." },
@@ -708,7 +714,7 @@ async function liveSocialPost(
   if (!await flagEnabled(admin, workspaceId, SEND_SOCIAL_FLAG)) {
     return gatedSkip(step.kind, SEND_SOCIAL_FLAG);
   }
-  if (userToken === SUPABASE_SERVICE_ROLE_KEY) {
+  if (isServiceRoleToken(userToken)) {
     return {
       status: "skipped",
       output: { live: true, summary: "social_post step skipped on cron-resume path (requires user-initiated run for publish auth)." },
