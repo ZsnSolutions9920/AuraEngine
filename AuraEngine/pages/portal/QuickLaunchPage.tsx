@@ -95,22 +95,26 @@ const QuickLaunchPage: React.FC = () => {
   });
 
   // ─── Workspace recovery (for accounts that pre-date the signup trigger) ─
+  const [wsName, setWsName] = useState('');
   const [creatingWs, setCreatingWs] = useState(false);
   const [createWsError, setCreateWsError] = useState<string | null>(null);
-  const handleCreateWorkspace = useCallback(async () => {
-    setCreatingWs(true); setCreateWsError(null);
+  const [createdWsName, setCreatedWsName] = useState<string | null>(null);
+  const handleCreateWorkspace = useCallback(async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    setCreatingWs(true); setCreateWsError(null); setCreatedWsName(null);
     try {
-      await createMyWorkspace(user.id);
+      const result = await createMyWorkspace(user.id, wsName);
       await refetchWorkspace();
       // Existing-mode lead query is keyed on workspaceId; invalidate so it
       // re-fires with the new value once the workspace query settles.
       qc.invalidateQueries({ queryKey: ['quick-launch-leads'] });
-    } catch (e) {
-      setCreateWsError((e as Error).message);
+      setCreatedWsName(result.name);
+    } catch (err) {
+      setCreateWsError((err as Error).message);
     } finally {
       setCreatingWs(false);
     }
-  }, [user.id, refetchWorkspace, qc]);
+  }, [user.id, wsName, refetchWorkspace, qc]);
 
   // ─── Audience state ─────────────────────────────────────────────────
   const [mode, setMode] = useState<AudienceMode>('sample');
@@ -311,21 +315,40 @@ const QuickLaunchPage: React.FC = () => {
               <AlertCircle size={14} className="mt-0.5 shrink-0" />
               <div className="flex-1">
                 <p className="font-semibold">No workspace found for your account</p>
-                <p className="mt-0.5">Your account predates the auto-provisioning flow. Click below to create one now — it's a one-click fix.</p>
-                <div className="mt-2 flex items-center gap-2">
-                  <button
-                    onClick={handleCreateWorkspace}
+                <p className="mt-0.5">Name your workspace and we'll set it up — leads, sequences, and team activity all live inside it.</p>
+                <form onSubmit={handleCreateWorkspace} className="mt-2 flex flex-col sm:flex-row sm:items-center gap-2">
+                  <input
+                    type="text"
+                    value={wsName}
+                    onChange={(e) => setWsName(e.target.value)}
+                    placeholder={user.businessProfile?.companyName ?? "e.g. Acme Outbound"}
                     disabled={creatingWs}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-bold hover:bg-amber-700 disabled:opacity-60"
+                    maxLength={80}
+                    className="flex-1 px-2.5 py-1.5 rounded-lg border border-amber-300 bg-white text-slate-900 text-xs placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-60"
+                  />
+                  <button
+                    type="submit"
+                    disabled={creatingWs}
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-bold hover:bg-amber-700 disabled:opacity-60"
                   >
                     {creatingWs ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
-                    {creatingWs ? 'Creating…' : 'Create my workspace'}
+                    {creatingWs ? 'Creating…' : 'Create workspace'}
                   </button>
-                  <span className="text-[10px] text-amber-700/70">or use Paste / Import CSV to start without one</span>
-                </div>
+                </form>
+                <p className="mt-1.5 text-[10px] text-amber-700/70">
+                  Leave blank to use {user.businessProfile?.companyName ? `"${user.businessProfile.companyName}"` : '"My Workspace"'}. You can change it later. Or skip this and use <span className="font-semibold">Paste</span> / <span className="font-semibold">Import CSV</span>.
+                </p>
                 {createWsError && (
                   <p className="mt-1.5 text-[11px] text-red-700">Couldn't create workspace: {createWsError}</p>
                 )}
+              </div>
+            </div>
+          ) : createdWsName ? (
+            <div className="mt-4 flex items-start gap-2 text-xs bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg p-3">
+              <Check size={14} className="mt-0.5 shrink-0" />
+              <div className="flex-1">
+                <p className="font-semibold">Workspace "{createdWsName}" is ready</p>
+                <p className="mt-0.5">It's empty for now — add leads via <span className="font-semibold">Import CSV</span> or <span className="font-semibold">Paste</span>, or jump to <button onClick={() => navigate('/portal/leads')} className="underline font-semibold">Leads</button> to build it out.</p>
               </div>
             </div>
           ) : existingEmailable.length === 0 ? (

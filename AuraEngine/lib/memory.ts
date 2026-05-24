@@ -44,14 +44,17 @@ export async function resolveWorkspaceForUser(userId: string): Promise<string | 
 /**
  * Idempotent self-service recovery: creates a workspace + owner membership
  * for the currently authenticated user if they're not yet a member of one.
- * Returns the workspace id and a flag indicating whether it was just
- * created (true) or already existed (false). Clears the in-memory cache
- * so the next resolveWorkspaceForUser() call hits the DB.
+ * Optional `name` sets the display name on first creation; subsequent calls
+ * return the existing workspace unchanged. Clears the in-memory cache so
+ * the next resolveWorkspaceForUser() call hits the DB.
  */
 export async function createMyWorkspace(
   userId: string,
-): Promise<{ workspaceId: string; created: boolean }> {
-  const { data, error } = await supabase.rpc('create_my_workspace');
+  name?: string,
+): Promise<{ workspaceId: string; created: boolean; name: string }> {
+  const { data, error } = await supabase.rpc('create_my_workspace', {
+    p_name: name?.trim() || null,
+  });
   if (error) throw new Error(error.message);
   const row = Array.isArray(data) ? data[0] : data;
   if (!row?.workspace_id) throw new Error('create_my_workspace returned no workspace_id');
@@ -59,6 +62,7 @@ export async function createMyWorkspace(
   return {
     workspaceId: row.workspace_id as string,
     created: row.created === true,
+    name: (row.name as string) ?? 'My Workspace',
   };
 }
 
