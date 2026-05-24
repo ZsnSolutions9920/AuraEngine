@@ -55,7 +55,7 @@ export async function resolveWorkspaceForUser(userId: string): Promise<string | 
 export async function createMyWorkspace(
   userId: string,
   name?: string,
-): Promise<{ workspaceId: string; created: boolean; name: string }> {
+): Promise<{ workspaceId: string; created: boolean; name: string; leadsAdopted: number }> {
   const trimmed = name?.trim();
   console.log('[createMyWorkspace] calling rpc with', { p_name: trimmed || null });
 
@@ -78,6 +78,7 @@ export async function createMyWorkspace(
     workspaceId: row.workspace_id as string,
     created: row.created === true,
     name: (row.name as string) ?? 'My Workspace',
+    leadsAdopted: typeof row.leads_adopted === 'number' ? row.leads_adopted : 0,
   };
 }
 

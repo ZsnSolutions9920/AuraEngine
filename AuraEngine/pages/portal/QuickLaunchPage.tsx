@@ -98,16 +98,16 @@ const QuickLaunchPage: React.FC = () => {
   const [wsName, setWsName] = useState('');
   const [creatingWs, setCreatingWs] = useState(false);
   const [createWsError, setCreateWsError] = useState<string | null>(null);
-  const [createdWsName, setCreatedWsName] = useState<string | null>(null);
+  const [createdWs, setCreatedWs] = useState<{ name: string; leadsAdopted: number } | null>(null);
   const handleCreateWorkspace = useCallback(async (e?: React.FormEvent) => {
     e?.preventDefault();
-    setCreatingWs(true); setCreateWsError(null); setCreatedWsName(null);
+    setCreatingWs(true); setCreateWsError(null); setCreatedWs(null);
     try {
       const result = await createMyWorkspace(user.id, wsName);
       // Don't await refetch — if it hangs, the success card still renders.
       refetchWorkspace().catch((err) => console.warn('[quick-launch] refetchWorkspace failed:', err));
       qc.invalidateQueries({ queryKey: ['quick-launch-leads'] });
-      setCreatedWsName(result.name);
+      setCreatedWs({ name: result.name, leadsAdopted: result.leadsAdopted });
     } catch (err) {
       console.error('[quick-launch] create workspace failed:', err);
       setCreateWsError((err as Error).message ?? String(err));
@@ -343,18 +343,22 @@ const QuickLaunchPage: React.FC = () => {
                 )}
               </div>
             </div>
-          ) : createdWsName ? (
+          ) : createdWs ? (
             <div className="mt-4 flex items-start gap-2 text-xs bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg p-3">
               <Check size={14} className="mt-0.5 shrink-0" />
               <div className="flex-1">
-                <p className="font-semibold">Workspace "{createdWsName}" is ready</p>
-                <p className="mt-0.5">It's empty for now — add leads via <span className="font-semibold">Import CSV</span> or <span className="font-semibold">Paste</span>, or jump to <button onClick={() => navigate('/portal/leads')} className="underline font-semibold">Leads</button> to build it out.</p>
+                <p className="font-semibold">Workspace "{createdWs.name}" is ready</p>
+                <p className="mt-0.5">
+                  {createdWs.leadsAdopted > 0
+                    ? <>Adopted <span className="font-semibold">{createdWs.leadsAdopted} lead{createdWs.leadsAdopted === 1 ? '' : 's'}</span> you already owned into this workspace. Click <span className="font-semibold">Existing</span> again to load them, or jump to <button onClick={() => navigate('/portal/leads')} className="underline font-semibold">Leads</button>.</>
+                    : <>It's empty for now — add leads via <span className="font-semibold">Import CSV</span> or <span className="font-semibold">Paste</span>, or jump to <button onClick={() => navigate('/portal/leads')} className="underline font-semibold">Leads</button> to build it out.</>}
+                </p>
               </div>
             </div>
           ) : existingEmailable.length === 0 ? (
             <div className="mt-4 flex items-start gap-2 text-xs bg-slate-50 border border-slate-200 text-slate-700 rounded-lg p-3">
               <Info size={14} className="mt-0.5 shrink-0 text-slate-500" />
-              <div>
+              <div className="flex-1">
                 <p className="font-semibold">
                   {existingLeads.length === 0
                     ? 'No leads in this workspace yet'
@@ -362,10 +366,29 @@ const QuickLaunchPage: React.FC = () => {
                 </p>
                 <p className="mt-0.5">
                   {existingLeads.length === 0
-                    ? 'Start with Paste or Import CSV — they accept emails directly.'
+                    ? 'If you imported leads on this account before, they may be tied to an older workspace. Click below to re-link any you own.'
                     : 'Add emails to your existing leads or use Paste / Import to launch a campaign now.'}
                 </p>
-                <p className="mt-1 text-[10px] text-slate-400 font-mono">workspace: {workspaceId.slice(0, 8)}…</p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => handleCreateWorkspace()}
+                    disabled={creatingWs}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-700 text-white text-[11px] font-bold hover:bg-slate-800 disabled:opacity-60"
+                  >
+                    {creatingWs ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                    {creatingWs ? 'Linking…' : 'Re-link my leads'}
+                  </button>
+                  <span className="text-[10px] text-slate-400 font-mono">workspace: {workspaceId.slice(0, 8)}…</span>
+                </div>
+                {createdWs && createdWs.leadsAdopted > 0 && (
+                  <p className="mt-1.5 text-[11px] text-emerald-700">Adopted {createdWs.leadsAdopted} lead{createdWs.leadsAdopted === 1 ? '' : 's'}. Click <span className="font-semibold">Existing</span> again to load them.</p>
+                )}
+                {createdWs && createdWs.leadsAdopted === 0 && (
+                  <p className="mt-1.5 text-[11px] text-slate-500">No drifted leads found for your account. Use Paste / Import CSV.</p>
+                )}
+                {createWsError && (
+                  <p className="mt-1.5 text-[11px] text-red-700">Couldn't re-link: {createWsError}</p>
+                )}
               </div>
             </div>
           ) : null
