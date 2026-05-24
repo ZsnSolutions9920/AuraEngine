@@ -1126,7 +1126,13 @@ Rules:
 
   const systemInstruction = resolved.systemInstruction;
 
-  // Direct inference (grounding consistently returns empty for business analysis).
+  // Grounded inference: enable URL context (Gemini fetches the actual page
+  // contents at `websiteUrl`) and Google Search (for related public signals
+  // like the company's LinkedIn / Crunchbase / news). Previously grounding
+  // returned empty text on this prompt — but that was against the retired
+  // gemini-3-flash-preview model. 2.5-flash handles tools + JSON-in-text
+  // output reliably.
+  //
   // Each attempt is bounded to ANALYSIS_TIMEOUT_MS so the wizard can never
   // sit indefinitely if Gemini stalls. With MAX_RETRIES=3 and a 60s cap
   // plus 1s/2s back-offs, worst-case total wait is ~183s before we surface
@@ -1143,7 +1149,11 @@ Rules:
             systemInstruction,
             temperature: resolved.temperature,
             topP: resolved.topP,
-          }
+            tools: [
+              { urlContext: {} },
+              { googleSearch: {} },
+            ],
+          } as never,
         }),
         new Promise<never>((_, reject) =>
           setTimeout(
