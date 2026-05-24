@@ -568,19 +568,11 @@ const ProfilePage: React.FC = () => {
   // ─── Clear & start over ────────────────────────────────────────────
   // Wipes the saved business profile from DB + local state, then drops the
   // user on the wizard input phase to enter a fresh URL. Costs 2 credits.
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [clearingProfile, setClearingProfile] = useState(false);
   const [clearError, setClearError] = useState<string | null>(null);
   const handleClearAndStartOver = useCallback(async () => {
-    const ok = confirm(
-      'Clear your business profile and start over?\n\n' +
-      'This will:\n' +
-      '• Remove every field currently saved (company name, services, ' +
-      'pricing, social links, everything).\n' +
-      '• Charge 2 AI credits.\n' +
-      '• Drop you on the AI setup screen so you can enter a new URL.\n\n' +
-      'You can\'t undo this. Continue?'
-    );
-    if (!ok) return;
+    setShowClearConfirm(false);
     setClearingProfile(true); setClearError(null);
     try {
       const creditResult = await consumeCredits(supabase, 'clear_business_profile');
@@ -1903,9 +1895,9 @@ const ProfilePage: React.FC = () => {
                   </button>
                   <button
                     type="button"
-                    onClick={handleClearAndStartOver}
+                    onClick={() => setShowClearConfirm(true)}
                     disabled={clearingProfile}
-                    title="Wipe all saved fields, refund-proof — 2 credits"
+                    title="Wipe all saved fields and re-analyze fresh — 2 credits"
                     className="px-3 py-2 bg-white border border-red-200 text-red-700 rounded-xl text-xs font-bold hover:bg-red-50 transition-colors whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {clearingProfile ? 'Clearing…' : 'Clear & start over · 2 cr'}
@@ -1916,6 +1908,59 @@ const ProfilePage: React.FC = () => {
                 <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700">
                   <AlertTriangleIcon className="w-4 h-4 mt-0.5 shrink-0" />
                   <span>{clearError}</span>
+                </div>
+              )}
+
+              {/* Clear & start over confirmation modal */}
+              {showClearConfirm && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+                  <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowClearConfirm(false)} />
+                  <div className="relative bg-white rounded-3xl shadow-2xl max-w-md w-full overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                    <div className="px-6 py-5 bg-gradient-to-br from-rose-50 to-amber-50 border-b border-slate-100">
+                      <div className="flex items-center gap-3">
+                        <div className="w-11 h-11 rounded-2xl bg-rose-100 flex items-center justify-center">
+                          <RefreshIcon className="w-5 h-5 text-rose-600" />
+                        </div>
+                        <div className="min-w-0">
+                          <h3 className="font-black text-slate-900 font-heading">Clear & start over</h3>
+                          <p className="text-xs text-slate-500 mt-0.5">Wipe this profile so AI can re-analyze fresh.</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="px-6 py-5 space-y-4">
+                      <ul className="space-y-2 text-sm text-slate-700">
+                        <li className="flex items-start gap-2">
+                          <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-rose-400 shrink-0" />
+                          <span>Removes every saved field — company name, services, pricing, social links, all of it.</span>
+                        </li>
+                        <li className="flex items-start gap-2">
+                          <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-rose-400 shrink-0" />
+                          <span>Charges <span className="font-bold">2 AI credits</span>.</span>
+                        </li>
+                        <li className="flex items-start gap-2">
+                          <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                          <span>Drops you on the AI setup screen so you can paste a new URL and re-analyze immediately.</span>
+                        </li>
+                      </ul>
+                      <p className="text-[11px] text-slate-400">You can't undo this. The new analysis starts on a blank slate.</p>
+                    </div>
+                    <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowClearConfirm(false)}
+                        className="px-4 py-2 rounded-xl bg-white border border-slate-200 text-slate-700 text-sm font-bold hover:bg-slate-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleClearAndStartOver}
+                        className="px-4 py-2 rounded-xl bg-rose-600 text-white text-sm font-bold hover:bg-rose-700 shadow-sm"
+                      >
+                        Clear & re-analyze · 2 cr
+                      </button>
+                    </div>
+                  </div>
                 </div>
               )}
 
