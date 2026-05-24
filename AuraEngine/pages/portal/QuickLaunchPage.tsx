@@ -135,7 +135,7 @@ const QuickLaunchPage: React.FC = () => {
         .select('id, first_name, last_name, primary_email, primary_phone, company, score, status, insights, title, industry')
         .eq('workspace_id', workspaceId)
         .order('score', { ascending: false, nullsFirst: false })
-        .limit(50);
+        .limit(200);
       if (error) console.warn('[quick-launch] leads query failed:', error.message);
       return ((data ?? []) as unknown[]).map((d) => ({
         ...(d as Record<string, unknown>),
@@ -146,14 +146,57 @@ const QuickLaunchPage: React.FC = () => {
     staleTime: 60_000,
   });
 
-  const existingEmailable = existingLeads.filter((l) => /\S+@\S+\.\S+/.test(l.primary_email ?? ''));
+  const existingEmailable = useMemo(
+    () => existingLeads.filter((l) => /\S+@\S+\.\S+/.test(l.primary_email ?? '')),
+    [existingLeads],
+  );
+
+  // ─── Recipient selection (Existing mode) ─────────────────────────
+  // Defaults to all-selected whenever the underlying list changes, so users
+  // who don't touch the checkboxes get the prior behaviour. Search narrows
+  // the visible list but doesn't affect selection.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [leadSearch, setLeadSearch] = useState('');
+
+  useEffect(() => {
+    setSelectedIds(new Set(existingEmailable.map((l) => l.id)));
+  }, [existingEmailable]);
+
+  const filteredEmailable = useMemo(() => {
+    const q = leadSearch.trim().toLowerCase();
+    if (!q) return existingEmailable;
+    return existingEmailable.filter((l) => {
+      const hay = `${l.first_name ?? ''} ${l.last_name ?? ''} ${l.primary_email ?? ''} ${l.company ?? ''} ${l.title ?? ''}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [existingEmailable, leadSearch]);
+
+  const toggleLead = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const selectAllVisible = useCallback(() => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const l of filteredEmailable) next.add(l.id);
+      return next;
+    });
+  }, [filteredEmailable]);
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+  }, []);
 
   const activeLeads: Lead[] = useMemo(() => {
     if (mode === 'sample') return SAMPLE_LEADS;
     if (mode === 'paste') return pasteLeads;
-    if (mode === 'existing') return existingEmailable;
+    if (mode === 'existing') return existingEmailable.filter((l) => selectedIds.has(l.id));
     return [];
-  }, [mode, pasteLeads, existingEmailable]);
+  }, [mode, pasteLeads, existingEmailable, selectedIds]);
 
   const isSampleMode = mode === 'sample';
 
@@ -417,8 +460,63 @@ const QuickLaunchPage: React.FC = () => {
           </div>
         )}
 
-        {/* Lead preview — only renders when there's something */}
-        {activeLeads.length > 0 && (
+        {/* Existing mode: selectable recipient list */}
+        {mode === 'existing' && existingEmailable.length > 0 && (
+          <div className="mt-4 space-y-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                Recipients · <span className="text-slate-900">{selectedIds.size}</span> of {existingEmailable.length} selected
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={leadSearch}
+                  onChange={(e) => setLeadSearch(e.target.value)}
+                  placeholder="Search name, email, company…"
+                  className="px-2.5 py-1 rounded-lg border border-slate-200 text-[11px] w-48 focus:outline-none focus:border-indigo-500"
+                />
+                <button onClick={selectAllVisible} className="text-[11px] font-bold text-indigo-600 hover:text-indigo-700">
+                  {leadSearch ? `Select ${filteredEmailable.length} visible` : 'Select all'}
+                </button>
+                <span className="text-slate-300">·</span>
+                <button onClick={clearSelection} className="text-[11px] font-bold text-slate-500 hover:text-slate-700">Clear</button>
+              </div>
+            </div>
+            <div className="space-y-0.5 max-h-72 overflow-y-auto rounded-xl border border-slate-100 bg-slate-50/40 p-2">
+              {filteredEmailable.length === 0 ? (
+                <p className="text-[11px] text-slate-400 italic text-center py-4">No matches for "{leadSearch}"</p>
+              ) : (
+                filteredEmailable.map((l) => {
+                  const checked = selectedIds.has(l.id);
+                  return (
+                    <label key={l.id} className={`flex items-center gap-2 text-xs px-2 py-1.5 rounded-md border cursor-pointer transition-colors ${checked ? 'bg-indigo-50/60 border-indigo-200' : 'bg-white border-slate-100 hover:bg-slate-50'}`}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleLead(l.id)}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <span className="font-semibold text-slate-700 truncate min-w-0 flex-shrink-0">{l.first_name} {l.last_name}</span>
+                      <span className="text-slate-400 truncate flex-1 min-w-0">{l.primary_email}</span>
+                      {l.company && <span className="text-slate-400 truncate hidden md:inline max-w-[120px]">{l.company}</span>}
+                      {typeof l.score === 'number' && l.score > 0 && (
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0 ${l.score >= 70 ? 'bg-emerald-50 text-emerald-700' : l.score >= 40 ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{l.score}</span>
+                      )}
+                    </label>
+                  );
+                })
+              )}
+            </div>
+            {existingLeads.length > existingEmailable.length && (
+              <p className="text-[10px] text-slate-400">
+                {existingLeads.length - existingEmailable.length} more lead{existingLeads.length - existingEmailable.length === 1 ? '' : 's'} in this workspace have no email address — add emails on the Leads page to include them.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Read-only preview for the other modes */}
+        {mode !== 'existing' && activeLeads.length > 0 && (
           <div className="mt-4 space-y-1.5">
             <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Preview ({activeLeads.length})</p>
             <div className="space-y-1 max-h-48 overflow-y-auto rounded-xl border border-slate-100 bg-slate-50/40 p-2">
